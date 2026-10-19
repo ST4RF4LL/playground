@@ -7,6 +7,7 @@ import http.client
 import json
 import math
 from pathlib import Path
+import re
 import socket
 import sys
 import threading
@@ -30,6 +31,7 @@ DEFAULTS = {
 }
 MAX_REQUEST = 2 * 1024 * 1024
 MAX_RESPONSE = 2 * 1024 * 1024
+DEFAULT_COLLECTION_ID = "baseline"
 
 
 def redact(value, secret):
@@ -105,10 +107,10 @@ def reject_json_constant(value):
     raise ValueError("上游包含非标准 JSON 数值。")
 
 
-def call_model(case, config):
+def call_model(case, config, profile="baseline"):
     started = time.perf_counter()
     proxy_mode = config.get("proxy_mode", DEFAULTS["proxy_mode"])
-    body = build_request(case, config["model"])
+    body = build_request(case, config["model"], profile=profile)
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if config["api_key"]:
         headers["Authorization"] = "Bearer " + config["api_key"]
@@ -168,13 +170,43 @@ class BenchServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
     def __init__(self, address):
-        self.cases = indexed(read_jsonl(DATASET_ROOT / "inputs/cases.jsonl"), "cases")
-        self.gold = indexed(read_jsonl(DATASET_ROOT / "gold/answers.jsonl"), "gold")
-        if set(self.cases) != set(self.gold):
-            raise ValueError("用例与答案 ID 不一致，请重新构建数据。")
-        self.manifest = json.loads((DATASET_ROOT / "manifest.json").read_text(encoding="utf-8"))
+        self.collections = {}
+        for root in sorted((DATASET_ROOT / "collections").iterdir()):
+            if not root.is_dir() or root.name.startswith("."):
+                continue
+            manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+            meta = manifest.get("collection")
+            if (not isinstance(meta, dict) or meta.get("id") != root.name
+                    or not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", root.name)
+                    or any(not isinstance(meta.get(key), str) or not meta[key].strip()
+                           for key in ("name", "description", "request_profile"))):
+                raise ValueError(f"测试集合 {root.name} 的元数据无效。")
+            profile = meta["request_profile"]
+            cases = indexed(read_jsonl(root / "inputs/cases.jsonl"), "cases")
+            gold = indexed(read_jsonl(root / "gold/answers.jsonl"), "gold")
+            if not cases or set(cases) != set(gold) or manifest.get("count") != len(cases):
+                raise ValueError(f"测试集合 {root.name} 的用例、答案或数量不一致。")
+            # Validate the shared request builder on startup; preview and sending
+            # must use the same profile and the same input-only fields.
+            for case in cases.values():
+                build_request(case, DEFAULT_MODEL, profile=profile)
+            metadata = {key: meta.get(key) for key in ("id", "name", "description", "request_profile", "cloned_from")}
+            metadata["count"] = len(cases)
+            self.collections[root.name] = {"metadata": metadata, "cases": cases,
+                                           "gold": gold, "manifest": manifest, "profile": profile}
+        if DEFAULT_COLLECTION_ID not in self.collections:
+            raise ValueError("缺少 baseline 测试集合，请重新构建数据。")
         self.upstream_slots = threading.BoundedSemaphore(4)
         super().__init__(address, BenchHandler)
+
+    def collection(self, collection_id):
+        # Resolve only IDs discovered at startup, never request-provided paths.
+        if not isinstance(collection_id, str) or collection_id not in self.collections:
+            raise ValueError("测试集合 ID 不存在或未指定。")
+        return self.collections[collection_id]
+
+    def collection_list(self):
+        return [entry["metadata"] for entry in self.collections.values()]
 
 
 class BenchHandler(BaseHTTPRequestHandler):
@@ -242,16 +274,32 @@ class BenchHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self.trusted_request():
             return
-        path = urllib.parse.urlsplit(self.path).path
+        url = urllib.parse.urlsplit(self.path)
+        path = url.path
+        if path == "/api/collections":
+            self.reply(200, {"collections": self.server.collection_list(),
+                             "default_collection_id": DEFAULT_COLLECTION_ID})
+            return
         if path == "/api/dataset":
+            query = urllib.parse.parse_qs(url.query, keep_blank_values=True)
+            ids = query.get("collection_id", [DEFAULT_COLLECTION_ID])
+            try:
+                if len(ids) != 1:
+                    raise ValueError("请指定一个测试集合。")
+                collection = self.server.collection(ids[0])
+            except ValueError as exc:
+                self.reply(400, {"error": str(exc)})
+                return
             cases = []
-            for key, row in self.server.cases.items():
-                answer = self.server.gold[key]
+            for key, row in collection["cases"].items():
+                answer = collection["gold"][key]
                 cases.append({"id": key, "title": answer["title"], "language": row["language"],
                               "focus_cwe": answer["focus_cwe"], "suite": answer["suite"],
                               "expected": answer["verdict"], "context": row["context"], "code": row["code"],
-                              "body": build_request(row, DEFAULT_MODEL)})
-            self.reply(200, {"cases": cases, "manifest": self.server.manifest, "defaults": DEFAULTS})
+                              "body": build_request(row, DEFAULT_MODEL, profile=collection["profile"])})
+            self.reply(200, {"cases": cases, "manifest": collection["manifest"], "defaults": DEFAULTS,
+                             "collection": collection["metadata"], "collections": self.server.collection_list(),
+                             "default_collection_id": DEFAULT_COLLECTION_ID})
             return
         assets = {"/": ("index.html", "text/html; charset=utf-8"),
                   "/index.html": ("index.html", "text/html; charset=utf-8"),
@@ -282,34 +330,38 @@ class BenchHandler(BaseHTTPRequestHandler):
             return
         try:
             data = self.read_object()
+            collection_id = data.get("collection_id")
+            collection = self.server.collection(collection_id)
             if path == "/api/run":
                 key = data.get("case_id")
-                if not isinstance(key, str) or key not in self.server.cases:
+                if not isinstance(key, str) or key not in collection["cases"]:
                     raise ValueError("用例 ID 不存在。")
                 config = validate_config(data.get("config"))
                 if not self.server.upstream_slots.acquire(blocking=False):
                     self.reply(429, {"error": "当前请求过多，请稍后重试。"})
                     return
                 try:
-                    result = call_model(self.server.cases[key], config)
+                    result = call_model(collection["cases"][key], config, profile=collection["profile"])
                 finally:
                     self.server.upstream_slots.release()
-                self.reply(200, result)
+                self.reply(200, {**result, "collection_id": collection_id})
                 return
             ids = data.get("case_ids")
             predictions = data.get("predictions")
-            if (not isinstance(ids, list) or not ids or len(ids) > len(self.server.cases)
-                    or not all(isinstance(key, str) and key in self.server.gold for key in ids)
+            if (not isinstance(ids, list) or not ids or len(ids) > len(collection["cases"])
+                    or not all(isinstance(key, str) and key in collection["gold"] for key in ids)
                     or len(set(ids)) != len(ids)):
                 raise ValueError("评分用例 ID 列表必须非空、有效且不重复。")
             if not isinstance(predictions, list) or not all(isinstance(r, dict) for r in predictions):
                 raise ValueError("predictions 必须为对象数组。")
-            rows = [dict(self.server.gold[key]) for key in ids]
+            if any(row.get("collection_id") != collection_id for row in predictions):
+                raise ValueError("每条预测必须包含与本批相同的 collection_id，不能跨集合评分。")
+            rows = [dict(collection["gold"][key]) for key in ids]
             pair_counts = Counter(r.get("pair_id") for r in rows if r.get("pair_id"))
             for row in rows:
                 if row.get("pair_id") and pair_counts[row["pair_id"]] != 2:
                     row["pair_id"] = None
-            self.reply(200, evaluate(rows, predictions))
+            self.reply(200, evaluate(rows, predictions, collection_id=collection_id))
         except (ValueError, TypeError) as exc:
             self.close_connection = True
             self.reply(400, {"error": str(exc)})
@@ -332,7 +384,8 @@ def main():
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
     print(f"Decision Lab · http://127.0.0.1:{server.server_port}", flush=True)
-    print(f"Loaded {len(server.cases)} cases. API keys and results stay in memory. Ctrl+C to stop.", flush=True)
+    count = sum(len(entry["cases"]) for entry in server.collections.values())
+    print(f"Loaded {len(server.collections)} collections / {count} case entries. API keys and results stay in memory. Ctrl+C to stop.", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

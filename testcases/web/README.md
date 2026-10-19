@@ -12,13 +12,15 @@ Windows 下可在仓库根目录运行 `python testcases/web/server.py`。数据
 
 ## 使用
 
+先在页面上方选择**测试集合**：`baseline` 保留原始提问，`cwe_specific` 使用相同 48 条代码、ID 和标签，统一判断某个具体 CWE，并增加该类别的成立及排除条件。切换集合会清空当前页面的结果和指标，请先导出需要保留的结果；API、模型、密钥、阈值、超时与代理配置会保留。运行期间不能切换集合。
+
 1. 填写 **Decision-model API** 完整地址，例如 `https://api.typesafe.ai/v1/systemone` 或自建服务的 `http://127.0.0.1:8000/v1/systemone/`。程序原样发送，不额外拼接路径。
 2. 填写 **模型名称**，默认 `jev-latest`。**API Key 可选**：填写后使用 `Authorization: Bearer ...`；留空不发送该请求头。TypeSafe 官方云服务需要密钥，允许匿名的兼容服务可以留空。
 3. 高级设置中的**代理模式默认直连**，不读取环境变量或操作系统的代理设置，适合直接访问公司内网 API。需要代理时，选择“使用环境 / 系统代理”：HTTP 接口读取 `http_proxy/HTTP_PROXY`，HTTPS 接口读取 `https_proxy/HTTPS_PROXY`，并遵循 `no_proxy/NO_PROXY`；没有环境代理配置时，Python 还可能使用操作系统代理设置。
 4. 点击案例查看实际请求 body，再单条试跑或按当前筛选批量运行。高级设置还可调整阈值（默认 0.5）及连接/读取超时（默认 60 秒）。
 5. 下载请求 JSONL，或导出本批结果和指标。结果 JSONL 可交给已有 `code_vulnerability/scripts/score.py` 评分。
 
-48 条现有用例会从同级数据集自动加载。界面展示标准答案用于对照，但实际发往模型的 body 仅含 `state/model/questions`。`state` 只包含语言、判定范围、目标 CWE、上下文和代码。ID、标题、标签、解释及来源不会发送给模型。
+测试集合从 `../code_vulnerability/collections/<集合 ID>/` 自动加载，每个目录保存独立的 `inputs/`、`gold/` 和 `manifest.json`。界面展示标准答案用于对照，但实际发往模型的 body 仅含 `state/model/questions`。`state` 只包含语言、判定范围、目标 CWE、上下文和代码。集合 ID、样本 ID、标题、标签、答案解释及来源不会发送给模型。
 
 请求示意（真实请求中的 state 包含完整上下文和代码）：
 
@@ -36,7 +38,7 @@ Windows 下可在仓库根目录运行 `python testcases/web/server.py`。数据
 }
 ```
 
-真实 body 以页面预览或 `code_vulnerability/inputs/requests/<id>.json` 为准。它使用决策模型的原生问题协议，不发送通用聊天接口的 `messages` 或要求模型输出 JSON 的 prompt。
+真实 body 以页面预览或 `code_vulnerability/collections/<集合 ID>/inputs/requests/<id>.json` 为准。它使用决策模型的原生问题协议，不发送通用聊天接口的 `messages` 或要求模型输出 JSON 的 prompt。细化集合的同一 CWE 共用同一组判断规则，不根据正负标签或某个用例的答案定制提示。
 
 ## 判定与结果
 
@@ -45,6 +47,10 @@ Windows 下可在仓库根目录运行 `python testcases/web/server.py`。数据
 HTTP 错误、超时、非法 JSON、缺失分数或越界分数全部记为错误，不转成“无漏洞”，也不从严格准确率分母剔除。严格准确率为**答对数 / 本批所有选定用例**；停止后未运行的用例记为漏答。本批包含完整正负对照时，指标导出中会包含对照组正确率。
 
 每批开始时固定配置与待测集合，顺序发送请求。**停止**只停止后续调度，已发出的请求会等待完成或超时并保留结果。重新运行会开始新一批，请先导出需要保留的结果。不会自动重试，避免重复计费。
+
+两个集合的样本 ID 相同，结果需要同时使用 `collection_id` 与样本 ID 关联。导出文件名含集合 ID，结果 JSONL 的每一行包含 `collection_id`，指标 JSON 记录集合及请求版本；请求 JSONL 仍是可直接发送的纯 body。离线评分时通过 `score.py --collection <集合 ID>` 选择对应答案。对比提问效果时应使用相同模型、阈值和用例范围；新增集合不会自动提高准确率，需实际复测。
+
+本地接口：`GET /api/collections` 列出集合；`GET /api/dataset?collection_id=...` 读取一个集合（省略时为 `baseline`）；`POST /api/run` 和 `POST /api/score` 均要求顶层 `collection_id`。评分请求中每条预测也必须带相同的 `collection_id`，缺失或跨集合数据会被拒绝。
 
 API Key 仅保存在当前页面与正在执行的请求内存中，不写磁盘、日志或结果文件；页面刷新后需重新填写。本地服务只监听回环地址，通过本地转发解决浏览器跨域访问问题。对上游重定向不自动跟随，以免把凭据发送到其他地址；遇到重定向需填写最终接口地址。
 

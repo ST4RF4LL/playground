@@ -21,6 +21,11 @@
       </div>
     </header>
 
+    <section class="panel collection-panel" aria-label="选择测试集合">
+      <label class="field collection-field"><span>测试集合</span><select id="collection-selector" aria-describedby="collection-description" disabled><option value="">正在加载集合…</option></select></label>
+      <div class="collection-info"><p id="collection-description">读取本地集合后，可在基础请求与 CWE 专项细化请求之间切换。</p><span class="collection-profile" id="collection-profile">切换集合会清空上批结果，保留连接配置。</span></div>
+    </section>
+
     <section class="panel config-panel" aria-labelledby="config-heading">
       <div class="section-heading"><h2 id="config-heading"><span class="section-number">01</span> 连接配置</h2><span class="hint">通过本地服务发送请求</span></div>
       <form id="config-form" autocomplete="off">

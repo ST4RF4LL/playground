@@ -6,6 +6,7 @@
     summary: $("dataset-summary"), form: $("config-form"), endpoint: $("endpoint"),
     model: $("model"), apiKey: $("api-key"), threshold: $("threshold"), timeout: $("timeout"),
     proxyMode: $("proxy-mode"), proxySummary: $("proxy-summary"),
+    collection: $("collection-selector"), collectionDescription: $("collection-description"), collectionProfile: $("collection-profile"),
     run: $("run-button"), runLabel: $("run-label"), stop: $("stop-button"), single: $("run-single"),
     status: $("run-status"), statusText: $("status-text"), retry: $("retry-button"),
     search: $("search"), language: $("language-filter"), cwe: $("cwe-filter"), clear: $("clear-filters"),
@@ -25,6 +26,8 @@
     cases: [], caseMap: new Map(), filtered: [], selectedId: null, tab: "request",
     running: false, stopRequested: false, inFlight: null, batch: null,
     results: new Map(), metrics: null, scoringError: null,
+    collections: [], collection: null, requestedCollectionId: null, loading: false,
+    loadVersion: 0, loadController: null, defaultsApplied: false, dirtyConfig: new Set(),
   };
   const languageNames = { java: "Java", python: "Python", c: "C", javascript: "JavaScript", cpp: "C++", go: "Go" };
   const cweNames = {
@@ -97,7 +100,7 @@
     if (!state.filtered.length) {
       const empty = document.createElement("p");
       empty.className = "empty-list";
-      empty.textContent = state.cases.length ? "没有匹配的用例，请调整筛选条件。" : "暂无可用的测试用例。";
+      empty.textContent = state.loading ? "正在加载测试集合…" : state.cases.length ? "没有匹配的用例，请调整筛选条件。" : "暂无可用的测试用例。";
       fragment.append(empty);
     }
     for (const item of state.filtered) {
@@ -230,16 +233,27 @@
   function renderControls() {
     for (const input of ui.form.querySelectorAll("input, select")) input.disabled = state.running;
     ui.proxySummary.textContent = ui.proxyMode.value === "system" ? "使用环境 / 系统代理" : "默认直连（不使用代理）";
-    ui.run.disabled = state.running || !state.filtered.length;
-    ui.runLabel.textContent = state.running ? `运行中 ${state.results.size} / ${state.batch.ids.length}` : `运行当前用例 (${state.filtered.length})`;
+    ui.collection.disabled = state.running || !state.collections.length;
+    if (state.requestedCollectionId) ui.collection.value = state.requestedCollectionId;
+    if (state.collection) {
+      ui.collectionDescription.textContent = state.collection.description || state.collection.name;
+      ui.collectionProfile.textContent = `${state.collection.count ?? state.cases.length} 条用例 · 切换集合会清空上批结果，保留连接配置。`;
+    } else {
+      const pending = state.collections.find((item) => item.id === state.requestedCollectionId);
+      ui.collectionDescription.textContent = state.loading ? `正在加载${pending ? `「${pending.name}」` : "测试集合"}，完成后即可运行。` : "集合加载失败，当前没有可运行的数据。请重试或切换集合。";
+      ui.collectionProfile.textContent = "连接配置保持不变；只有成功加载后才能运行与导出。";
+    }
+    for (const filter of [ui.search, ui.language, ui.cwe]) filter.disabled = state.loading || !state.cases.length;
+    ui.run.disabled = state.running || state.loading || !state.collection || !state.filtered.length;
+    ui.runLabel.textContent = state.loading ? "正在加载集合…" : state.running ? `运行中 ${state.results.size} / ${state.batch.ids.length}` : `运行当前用例 (${state.filtered.length})`;
     ui.run.title = "开始新批次，清空上批结果";
-    ui.single.disabled = state.running || !state.selectedId;
+    ui.single.disabled = state.running || state.loading || !state.collection || !state.selectedId;
     ui.single.title = "以此用例开始新批次，清空上批结果";
     ui.stop.disabled = !state.running || state.stopRequested;
     ui.stop.textContent = state.stopRequested && state.running ? "等待当前请求…" : "■ 停止";
-    ui.requests.disabled = !state.filtered.length;
-    ui.results.disabled = state.running || !state.results.size;
-    ui.metrics.disabled = state.running || !state.metrics;
+    ui.requests.disabled = state.loading || !state.collection || !state.filtered.length;
+    ui.results.disabled = state.running || state.loading || !state.results.size;
+    ui.metrics.disabled = state.running || state.loading || !state.metrics;
     ui.clear.hidden = !(ui.search.value || ui.language.value || ui.cwe.value);
   }
 
@@ -301,8 +315,11 @@
 
   async function refreshScore() {
     try {
-      const predictions = [...state.results.values()].map((result) => result.status === "ok" ? { id: result.id, verdict: result.verdict } : { id: result.id, error: true });
-      state.metrics = await post("/api/score", { case_ids: state.batch.ids, predictions });
+      const collection_id = state.batch.collection_id;
+      const predictions = [...state.results.values()].map((result) => result.status === "ok" ? { id: result.id, collection_id, verdict: result.verdict } : { id: result.id, collection_id, error: true });
+      const metrics = await post("/api/score", { collection_id, case_ids: state.batch.ids, predictions });
+      if (metrics.collection_id !== collection_id) throw new Error("指标服务返回了不匹配的测试集合。");
+      state.metrics = metrics;
       state.scoringError = null;
     } catch (error) {
       state.metrics = null;
@@ -311,12 +328,12 @@
   }
 
   async function startBatch(ids) {
-    if (state.running || !ids.length) return;
+    if (state.running || state.loading || !state.collection || !ids.length) return;
     const config = readConfig();
     if (!config) return;
     state.running = true;
     state.stopRequested = false;
-    state.batch = { ids: Object.freeze([...ids]), config, started_at: new Date().toISOString(), finished_at: null };
+    state.batch = { ids: Object.freeze([...ids]), collection_id: state.collection.id, collection: Object.freeze({ ...state.collection }), config, started_at: new Date().toISOString(), finished_at: null };
     state.results.clear();
     state.metrics = null;
     state.scoringError = null;
@@ -331,11 +348,11 @@
         const started = performance.now();
         let result;
         try {
-          result = await post("/api/run", { case_id: id, config });
-          if (result.id !== id || !["ok", "error"].includes(result.status)) throw new Error("本地服务返回了不匹配的用例结果。");
+          result = await post("/api/run", { collection_id: state.batch.collection_id, case_id: id, config });
+          if (result.id !== id || result.collection_id !== state.batch.collection_id || !["ok", "error"].includes(result.status)) throw new Error("本地服务返回了不匹配的集合或用例结果。");
           if (result.status === "ok" && (!["vulnerable", "not_vulnerable"].includes(result.verdict) || !Number.isFinite(result.score))) throw new Error("模型响应没有有效的判断或 noul 分值。");
         } catch (error) {
-          result = { id, status: "error", latency_ms: Math.round(performance.now() - started), error: error.message, raw_response: null };
+          result = { id, collection_id: state.batch.collection_id, status: "error", latency_ms: Math.round(performance.now() - started), error: error.message, raw_response: null };
         }
         state.results.set(id, redactSecrets(result, config.api_key));
         state.inFlight = null;
@@ -372,40 +389,94 @@
 
   function exportableResult(result) {
     const row = {};
-    for (const key of ["id", "status", "verdict", "score", "latency_ms", "http_status", "response_model", "error", "raw_response"]) {
+    for (const key of ["id", "collection_id", "status", "verdict", "score", "latency_ms", "http_status", "response_model", "error", "raw_response"]) {
       if (result[key] !== undefined) row[key] = result[key];
     }
     return redactSecrets(row);
   }
 
-  async function loadDataset() {
+  function applyInitialDefaults(defaults) {
+    if (state.defaultsApplied) return;
+    const entries = [[ui.endpoint, defaults.endpoint], [ui.model, defaults.model],
+      [ui.threshold, defaults.threshold], [ui.timeout, defaults.timeout],
+      [ui.proxyMode, ["direct", "system"].includes(defaults.proxy_mode) ? defaults.proxy_mode : undefined]];
+    for (const [input, value] of entries) {
+      if (value !== undefined && value !== null && !state.dirtyConfig.has(input.id)) input.value = value;
+    }
+    state.defaultsApplied = true;
+  }
+
+  async function loadDataset(collectionId = state.requestedCollectionId) {
+    if (state.running) return;
+    const version = ++state.loadVersion;
+    state.loadController?.abort();
+    const controller = new AbortController();
+    state.loadController = controller;
+    state.requestedCollectionId = collectionId || null;
+    state.loading = true;
+    // Clear the previous collection immediately: identical case IDs must never
+    // leave old bodies, predictions, or denominators attached to a new selection.
+    state.collection = null;
+    state.cases = [];
+    state.caseMap = new Map();
+    state.filtered = [];
+    state.selectedId = null;
+    state.batch = null;
+    state.inFlight = null;
+    state.stopRequested = false;
+    state.results.clear();
+    state.metrics = null;
+    state.scoringError = null;
+    ui.search.value = "";
+    ui.language.replaceChildren(new Option("全部语言", ""));
+    ui.cwe.replaceChildren(new Option("全部漏洞类别", ""));
     ui.retry.hidden = true;
-    setStatus("正在读取本地数据集…");
+    ui.summary.textContent = "正在加载测试集合…";
+    setStatus("正在读取测试集合…");
+    render();
     try {
-      const response = await fetch("/api/dataset", { cache: "no-store", credentials: "same-origin" });
-      if (!response.ok) throw new Error(`数据集加载失败（HTTP ${response.status}）。`);
+      const path = `/api/dataset${collectionId ? `?collection_id=${encodeURIComponent(collectionId)}` : ""}`;
+      const response = await fetch(path, { cache: "no-store", credentials: "same-origin", signal: controller.signal });
+      if (!response.ok) throw new Error(`集合加载失败（HTTP ${response.status}）。`);
       const data = await response.json();
-      if (!Array.isArray(data.cases) || !data.cases.length) throw new Error("本地数据集为空或格式无效。");
-      state.cases = data.cases.map((item, index) => ({ ...item, _index: index }));
-      state.caseMap = new Map(state.cases.map((item) => [item.id, item]));
-      const defaults = data.defaults || {};
-      if (defaults.endpoint) ui.endpoint.value = defaults.endpoint;
-      if (defaults.model) ui.model.value = defaults.model;
-      if (defaults.threshold !== undefined) ui.threshold.value = defaults.threshold;
-      if (defaults.timeout !== undefined) ui.timeout.value = defaults.timeout;
-      if (["direct", "system"].includes(defaults.proxy_mode)) ui.proxyMode.value = defaults.proxy_mode;
+      if (version !== state.loadVersion) return;
+      if (!Array.isArray(data.cases) || !data.cases.length) throw new Error("测试集合为空或格式无效。");
+      if (!data.collection?.id || !Array.isArray(data.collections) || !data.collections.some((item) => item.id === data.collection.id)) throw new Error("测试集合元数据缺失或格式无效。");
+      if (collectionId && data.collection.id !== collectionId) throw new Error("服务返回了不匹配的测试集合，请重试。");
+      const cases = data.cases.map((item, index) => ({ ...item, _index: index }));
+      const caseMap = new Map(cases.map((item) => [item.id, item]));
+      if (caseMap.size !== cases.length) throw new Error("测试集合包含重复的用例 ID。");
+      state.collection = Object.freeze({ ...data.collection });
+      state.collections = data.collections;
+      state.requestedCollectionId = data.collection.id;
+      state.cases = cases;
+      state.caseMap = caseMap;
+      ui.collection.replaceChildren(...state.collections.map((item) => new Option(item.name, item.id)));
+      ui.collection.value = state.collection.id;
+      applyInitialDefaults(data.defaults || {});
       const languages = [...new Set(state.cases.map((item) => item.language))];
       const categories = [...new Set(state.cases.map((item) => item.focus_cwe))].sort((a, b) => a.localeCompare(b, "en", { numeric: true }));
       ui.language.replaceChildren(new Option("全部语言", ""), ...languages.map((language) => new Option(languageNames[language] || language, language)));
       ui.cwe.replaceChildren(new Option("全部漏洞类别", ""), ...categories.map((cwe) => new Option(`${cwe}${cweNames[cwe] ? ` · ${cweNames[cwe]}` : ""}`, cwe)));
       const positive = state.cases.filter((item) => expectedVerdict(item) === "vulnerable").length;
-      ui.summary.textContent = `${state.cases.length} 条用例 · ${languages.length} 种语言 · ${categories.length} 类漏洞 · 有漏洞 ${positive} / 无目标漏洞 ${state.cases.length - positive}`;
+      ui.summary.textContent = `${state.collection.name} · ${state.cases.length} 条用例 · ${languages.length} 种语言 · ${categories.length} 类漏洞 · 有漏洞 ${positive} / 无目标漏洞 ${state.cases.length - positive}`;
+      state.loading = false;
+      state.loadController = null;
       applyFilters();
-      setStatus("用例已就绪。填写连接配置后开始测试；每次运行都会创建新批次。", "success");
+      setStatus(`「${state.collection.name}」已就绪。每次运行创建新批次，切换集合会清空结果并保留连接配置。`, "success");
     } catch (error) {
-      ui.summary.textContent = "未能读取本地数据集";
+      if (version !== state.loadVersion || error.name === "AbortError") return;
+      state.loading = false;
+      state.loadController = null;
+      state.collection = null;
+      state.cases = [];
+      state.caseMap = new Map();
+      state.filtered = [];
+      state.selectedId = null;
+      ui.summary.textContent = "未能读取所选测试集合";
       ui.retry.hidden = false;
-      setStatus(`${error.message} 请确认本地测试服务正在运行。`, "error");
+      if (!state.collections.length) ui.collection.replaceChildren(new Option("集合加载失败", ""));
+      setStatus(`${error.message} 请重试或选择其他集合。`, "error");
       render();
     }
   }
@@ -425,7 +496,9 @@
   ui.clear.addEventListener("click", () => { ui.search.value = ""; ui.language.value = ""; ui.cwe.value = ""; applyFilters(); });
   ui.model.addEventListener("input", renderDetail);
   ui.proxyMode.addEventListener("change", renderControls);
-  ui.retry.addEventListener("click", loadDataset);
+  for (const eventName of ["input", "change"]) ui.form.addEventListener(eventName, (event) => state.dirtyConfig.add(event.target.id));
+  ui.collection.addEventListener("change", () => loadDataset(ui.collection.value));
+  ui.retry.addEventListener("click", () => loadDataset());
   for (const tab of ui.tabs) {
     tab.addEventListener("click", () => { state.tab = tab.dataset.tab; renderDetail(); });
     tab.addEventListener("keydown", (event) => {
@@ -450,17 +523,19 @@
     window.setTimeout(() => { ui.copy.textContent = "复制"; }, 1800);
   });
   ui.requests.addEventListener("click", () => {
+    if (state.loading || !state.collection || !state.filtered.length) return;
     const lines = state.filtered.map((item) => JSON.stringify(requestBody(item))).join("\n") + "\n";
-    download(`decision-requests-${state.filtered.length}.jsonl`, lines, "application/x-ndjson;charset=utf-8");
+    download(`decision-requests-${state.collection.id}-${state.filtered.length}.jsonl`, lines, "application/x-ndjson;charset=utf-8");
   });
   ui.results.addEventListener("click", () => {
+    if (state.running || state.loading || !state.batch || !state.results.size) return;
     const rows = state.batch.ids.filter((id) => state.results.has(id)).map((id) => exportableResult(state.results.get(id)));
-    download(`decision-results-${rows.length}.jsonl`, rows.map((row) => JSON.stringify(row)).join("\n") + "\n", "application/x-ndjson;charset=utf-8");
+    download(`decision-results-${state.batch.collection_id}-${rows.length}.jsonl`, rows.map((row) => JSON.stringify(row)).join("\n") + "\n", "application/x-ndjson;charset=utf-8");
   });
   ui.metrics.addEventListener("click", () => {
-    if (!state.metrics) return;
-    const report = { ...state.metrics, run: { case_ids: state.batch.ids, model: state.batch.config.model, endpoint: state.batch.config.endpoint, threshold: state.batch.config.threshold, timeout: state.batch.config.timeout, proxy_mode: state.batch.config.proxy_mode, started_at: state.batch.started_at, finished_at: state.batch.finished_at } };
-    download("decision-metrics.json", JSON.stringify(redactSecrets(report), null, 2) + "\n", "application/json;charset=utf-8");
+    if (state.running || state.loading || !state.metrics || !state.batch) return;
+    const report = { ...state.metrics, run: { collection_id: state.batch.collection_id, collection_name: state.batch.collection.name, request_profile: state.batch.collection.request_profile, case_ids: state.batch.ids, model: state.batch.config.model, endpoint: state.batch.config.endpoint, threshold: state.batch.config.threshold, timeout: state.batch.config.timeout, proxy_mode: state.batch.config.proxy_mode, started_at: state.batch.started_at, finished_at: state.batch.finished_at } };
+    download(`decision-metrics-${state.batch.collection_id}.json`, JSON.stringify(redactSecrets(report), null, 2) + "\n", "application/json;charset=utf-8");
   });
   loadDataset();
 })();
