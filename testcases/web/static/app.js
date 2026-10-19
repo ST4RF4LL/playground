@@ -5,6 +5,7 @@
   const ui = {
     summary: $("dataset-summary"), form: $("config-form"), endpoint: $("endpoint"),
     model: $("model"), apiKey: $("api-key"), threshold: $("threshold"), timeout: $("timeout"),
+    proxyMode: $("proxy-mode"), proxySummary: $("proxy-summary"),
     run: $("run-button"), runLabel: $("run-label"), stop: $("stop-button"), single: $("run-single"),
     status: $("run-status"), statusText: $("status-text"), retry: $("retry-button"),
     search: $("search"), language: $("language-filter"), cwe: $("cwe-filter"), clear: $("clear-filters"),
@@ -227,7 +228,8 @@
   }
 
   function renderControls() {
-    for (const input of ui.form.querySelectorAll("input")) input.disabled = state.running;
+    for (const input of ui.form.querySelectorAll("input, select")) input.disabled = state.running;
+    ui.proxySummary.textContent = ui.proxyMode.value === "system" ? "使用环境 / 系统代理" : "默认直连（不使用代理）";
     ui.run.disabled = state.running || !state.filtered.length;
     ui.runLabel.textContent = state.running ? `运行中 ${state.results.size} / ${state.batch.ids.length}` : `运行当前用例 (${state.filtered.length})`;
     ui.run.title = "开始新批次，清空上批结果";
@@ -265,6 +267,7 @@
     const model = ui.model.value.trim();
     const threshold = Number(ui.threshold.value);
     const timeout = Number(ui.timeout.value);
+    const proxy_mode = ui.proxyMode.value;
     let url;
     try { url = new URL(endpoint); } catch { setStatus("请填写完整的 API URL。", "error"); ui.endpoint.focus(); return null; }
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) {
@@ -277,7 +280,12 @@
       setStatus("判定阈值应在 0–1 之间，超时应为 1–300 秒的整数。", "error");
       return null;
     }
-    return Object.freeze({ endpoint, api_key: ui.apiKey.value.trim(), model, threshold, timeout });
+    if (!["direct", "system"].includes(proxy_mode)) {
+      setStatus("请选择有效的代理模式。", "error");
+      ui.proxyMode.focus();
+      return null;
+    }
+    return Object.freeze({ endpoint, api_key: ui.apiKey.value.trim(), model, threshold, timeout, proxy_mode });
   }
 
   async function post(path, payload) {
@@ -345,7 +353,7 @@
       else message += " 可导出结果与详细指标。";
       setStatus(message, state.scoringError || errors ? "error" : "success");
       // Keep only non-secret batch metadata after the requests have finished.
-      state.batch.config = Object.freeze({ endpoint: config.endpoint, model: config.model, threshold: config.threshold, timeout: config.timeout });
+      state.batch.config = Object.freeze({ endpoint: config.endpoint, model: config.model, threshold: config.threshold, timeout: config.timeout, proxy_mode: config.proxy_mode });
       render();
     }
   }
@@ -385,6 +393,7 @@
       if (defaults.model) ui.model.value = defaults.model;
       if (defaults.threshold !== undefined) ui.threshold.value = defaults.threshold;
       if (defaults.timeout !== undefined) ui.timeout.value = defaults.timeout;
+      if (["direct", "system"].includes(defaults.proxy_mode)) ui.proxyMode.value = defaults.proxy_mode;
       const languages = [...new Set(state.cases.map((item) => item.language))];
       const categories = [...new Set(state.cases.map((item) => item.focus_cwe))].sort((a, b) => a.localeCompare(b, "en", { numeric: true }));
       ui.language.replaceChildren(new Option("全部语言", ""), ...languages.map((language) => new Option(languageNames[language] || language, language)));
@@ -415,6 +424,7 @@
   ui.cwe.addEventListener("change", applyFilters);
   ui.clear.addEventListener("click", () => { ui.search.value = ""; ui.language.value = ""; ui.cwe.value = ""; applyFilters(); });
   ui.model.addEventListener("input", renderDetail);
+  ui.proxyMode.addEventListener("change", renderControls);
   ui.retry.addEventListener("click", loadDataset);
   for (const tab of ui.tabs) {
     tab.addEventListener("click", () => { state.tab = tab.dataset.tab; renderDetail(); });
@@ -449,7 +459,7 @@
   });
   ui.metrics.addEventListener("click", () => {
     if (!state.metrics) return;
-    const report = { ...state.metrics, run: { case_ids: state.batch.ids, model: state.batch.config.model, endpoint: state.batch.config.endpoint, threshold: state.batch.config.threshold, timeout: state.batch.config.timeout, started_at: state.batch.started_at, finished_at: state.batch.finished_at } };
+    const report = { ...state.metrics, run: { case_ids: state.batch.ids, model: state.batch.config.model, endpoint: state.batch.config.endpoint, threshold: state.batch.config.threshold, timeout: state.batch.config.timeout, proxy_mode: state.batch.config.proxy_mode, started_at: state.batch.started_at, finished_at: state.batch.finished_at } };
     download("decision-metrics.json", JSON.stringify(redactSecrets(report), null, 2) + "\n", "application/json;charset=utf-8");
   });
   loadDataset();

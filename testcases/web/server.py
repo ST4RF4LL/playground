@@ -26,6 +26,7 @@ DEFAULTS = {
     "model": DEFAULT_MODEL,
     "threshold": 0.5,
     "timeout": 60,
+    "proxy_mode": "direct",
 }
 MAX_REQUEST = 2 * 1024 * 1024
 MAX_RESPONSE = 2 * 1024 * 1024
@@ -56,6 +57,9 @@ def validate_config(config):
     endpoint = config.get("endpoint", "")
     model = config.get("model", "")
     api_key = config.get("api_key", "")
+    proxy_mode = config.get("proxy_mode", DEFAULTS["proxy_mode"])
+    if not isinstance(proxy_mode, str) or proxy_mode not in {"direct", "system"}:
+        raise ValueError("代理模式必须为 direct（直连）或 system（环境 / 系统代理）。")
     if not isinstance(endpoint, str) or not endpoint.strip() or len(endpoint) > 4096:
         raise ValueError("请输入完整的 HTTP(S) API 地址。")
     endpoint = endpoint.strip()
@@ -88,6 +92,7 @@ def validate_config(config):
         "endpoint": endpoint, "model": model.strip(), "api_key": api_key.strip(),
         "threshold": finite_number(config.get("threshold", 0.5), "判定阈值", 0, 1),
         "timeout": finite_number(config.get("timeout", 60), "请求超时（秒）", 1, 300),
+        "proxy_mode": proxy_mode,
     }
 
 
@@ -102,6 +107,7 @@ def reject_json_constant(value):
 
 def call_model(case, config):
     started = time.perf_counter()
+    proxy_mode = config.get("proxy_mode", DEFAULTS["proxy_mode"])
     body = build_request(case, config["model"])
     headers = {"Content-Type": "application/json", "Accept": "application/json"}
     if config["api_key"]:
@@ -110,9 +116,11 @@ def call_model(case, config):
                                  data=json.dumps(body, ensure_ascii=False, allow_nan=False).encode("utf-8"),
                                  headers=headers, method="POST")
     result = {"id": case["id"], "status": "error", "http_status": None,
-              "response_model": None, "raw_response": None}
+              "response_model": None, "raw_response": None, "proxy_mode": proxy_mode}
     try:
-        opener = urllib.request.build_opener(NoRedirect())
+        # An explicit empty handler disables environment AND OS proxy discovery.
+        proxy_handler = urllib.request.ProxyHandler({}) if proxy_mode == "direct" else urllib.request.ProxyHandler()
+        opener = urllib.request.build_opener(proxy_handler, NoRedirect())
         try:
             response = opener.open(req, timeout=config["timeout"])
         except urllib.error.HTTPError as exc:
@@ -131,6 +139,9 @@ def call_model(case, config):
         if not 200 <= result["http_status"] < 300:
             if 300 <= result["http_status"] < 400:
                 raise ValueError(f"上游返回 HTTP {result['http_status']} 重定向；请在配置中填写最终 API 地址。")
+            if result["http_status"] == 504:
+                mode = "直连（未使用代理）" if proxy_mode == "direct" else "使用环境 / 系统代理配置"
+                raise ValueError(f"上游返回 HTTP 504（网关超时）；当前连接方式：{mode}。请查看原始响应；504 也可能来自接口自身的网关。")
             raise ValueError(f"上游返回 HTTP {result['http_status']}；请查看原始响应。")
         if not isinstance(parsed, dict):
             raise ValueError("上游未返回 JSON 对象；请确认使用 /v1/systemone 兼容接口。")
@@ -161,7 +172,7 @@ class BenchServer(ThreadingHTTPServer):
         self.gold = indexed(read_jsonl(DATASET_ROOT / "gold/answers.jsonl"), "gold")
         if set(self.cases) != set(self.gold):
             raise ValueError("用例与答案 ID 不一致，请重新构建数据。")
-        self.manifest = json.loads((DATASET_ROOT / "manifest.json").read_text())
+        self.manifest = json.loads((DATASET_ROOT / "manifest.json").read_text(encoding="utf-8"))
         self.upstream_slots = threading.BoundedSemaphore(4)
         super().__init__(address, BenchHandler)
 

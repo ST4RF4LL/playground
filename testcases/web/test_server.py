@@ -6,13 +6,18 @@ All upstream calls terminate at an ephemeral loopback HTTP server.
 
 import importlib.util
 import json
+import os
+from contextlib import contextmanager
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import threading
 import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
+import urllib.request as urllib_request
 
 
 WEB_ROOT = Path(__file__).resolve().parent
@@ -26,6 +31,48 @@ def answer(score=0.8, **extra):
         "answers": {"has_vulnerability": {"type": "noul", "noul": score}},
         **extra,
     }
+
+
+def load_server_module():
+    spec = importlib.util.spec_from_file_location("decision_testbench_server", WEB_ROOT / "server.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestUtf8DataLoading(unittest.TestCase):
+    def test_server_loads_utf8_dataset_with_gbk_default_encoding(self):
+        """Reproduce non-UTF-8 Windows defaults without opening a listening socket."""
+        module = load_server_module()
+        cases_path = DATA_ROOT / "inputs/cases.jsonl"
+        gold_path = DATA_ROOT / "gold/answers.jsonl"
+        expected_cases = {row["id"]: row for row in map(json.loads, cases_path.read_text(encoding="utf-8").splitlines())}
+        expected_gold = {row["id"]: row for row in map(json.loads, gold_path.read_text(encoding="utf-8").splitlines())}
+        expected_manifest = json.loads((DATA_ROOT / "manifest.json").read_text(encoding="utf-8"))
+        # The current manifest is ASCII-only; exercise a valid Chinese metadata field too.
+        expected_manifest["description"] = "代码漏洞评估用例"
+        original_read_text = Path.read_text
+
+        def gbk_default_read_text(path, encoding=None, errors=None, **kwargs):
+            return original_read_text(path, encoding=encoding or "gbk", errors=errors, **kwargs)
+
+        with TemporaryDirectory() as temporary:
+            dataset = Path(temporary)
+            (dataset / "inputs").mkdir()
+            (dataset / "gold").mkdir()
+            (dataset / "inputs/cases.jsonl").write_bytes(cases_path.read_bytes())
+            (dataset / "gold/answers.jsonl").write_bytes(gold_path.read_bytes())
+            (dataset / "manifest.json").write_text(json.dumps(expected_manifest, ensure_ascii=False), encoding="utf-8")
+            with patch.object(module, "DATASET_ROOT", dataset), patch.object(Path, "read_text", gbk_default_read_text), patch.object(ThreadingHTTPServer, "__init__", return_value=None):
+                server = module.create_server(host="127.0.0.1", port=0)
+
+        self.assertEqual(len(server.cases), 48)
+        self.assertEqual(len(server.gold), 48)
+        self.assertEqual(server.cases, expected_cases)
+        self.assertEqual(server.gold, expected_gold)
+        self.assertEqual(server.manifest, expected_manifest)
+        self.assertIn("攻击者", server.cases["cv_ec63ace1718b"]["context"])
+        self.assertEqual(server.gold["cv_ec63ace1718b"]["title"], "PreparedStatement 与动态排序字段")
 
 
 class MockDecisionHandler(BaseHTTPRequestHandler):
@@ -55,20 +102,23 @@ class MockDecisionHandler(BaseHTTPRequestHandler):
 class TestDecisionServer(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        spec = importlib.util.spec_from_file_location("decision_testbench_server", WEB_ROOT / "server.py")
-        cls.module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(cls.module)
+        cls.module = load_server_module()
         cls.upstream = ThreadingHTTPServer(("127.0.0.1", 0), MockDecisionHandler)
         cls.upstream.daemon_threads = True
         cls.upstream_thread = threading.Thread(target=cls.upstream.serve_forever, daemon=True)
         cls.upstream_thread.start()
+        cls.proxy = ThreadingHTTPServer(("127.0.0.1", 0), MockDecisionHandler)
+        cls.proxy.daemon_threads = True
+        cls.proxy_thread = threading.Thread(target=cls.proxy.serve_forever, daemon=True)
+        cls.proxy_thread.start()
         cls.app = cls.module.create_server(host="127.0.0.1", port=0)
         cls.app_thread = threading.Thread(target=cls.app.serve_forever, daemon=True)
         cls.app_thread.start()
         cls.base_url = "http://127.0.0.1:%d" % cls.app.server_address[1]
         cls.endpoint = "http://127.0.0.1:%d/v1/systemone/" % cls.upstream.server_address[1]
-        cls.input_cases = [json.loads(line) for line in (DATA_ROOT / "inputs/cases.jsonl").read_text().splitlines() if line]
-        cls.gold = [json.loads(line) for line in (DATA_ROOT / "gold/answers.jsonl").read_text().splitlines() if line]
+        cls.proxy_url = "http://127.0.0.1:%d" % cls.proxy.server_address[1]
+        cls.input_cases = [json.loads(line) for line in (DATA_ROOT / "inputs/cases.jsonl").read_text(encoding="utf-8").splitlines() if line]
+        cls.gold = [json.loads(line) for line in (DATA_ROOT / "gold/answers.jsonl").read_text(encoding="utf-8").splitlines() if line]
         cls.case_id = cls.input_cases[0]["id"]
         deadline = time.monotonic() + 3
         while True:
@@ -83,7 +133,7 @@ class TestDecisionServer(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls):
-        for server, thread in ((cls.app, cls.app_thread), (cls.upstream, cls.upstream_thread)):
+        for server, thread in ((cls.app, cls.app_thread), (cls.upstream, cls.upstream_thread), (cls.proxy, cls.proxy_thread)):
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
@@ -94,6 +144,20 @@ class TestDecisionServer(unittest.TestCase):
         self.upstream.status = 200
         self.upstream.content_type = "application/json"
         self.upstream.redirect = None
+        self.proxy.requests = []
+        self.proxy.response = {"error": "local proxy generated 504"}
+        self.proxy.status = 504
+        self.proxy.content_type = "application/json"
+        self.proxy.redirect = None
+
+    @contextmanager
+    def proxy_environment(self, no_proxy=None):
+        """Use real environment-proxy behavior, isolated from OS proxy settings."""
+        environment = {"HTTP_PROXY": self.proxy_url, "http_proxy": self.proxy_url}
+        if no_proxy is not None:
+            environment["NO_PROXY"] = no_proxy
+        with patch.dict(os.environ, environment, clear=True), patch.object(urllib_request, "getproxies", urllib_request.getproxies_environment), patch.object(urllib_request, "proxy_bypass", urllib_request.proxy_bypass_environment):
+            yield
 
     def request(self, path, payload=None, headers=None, trusted=True):
         request_headers = {"Content-Type": "application/json"}
@@ -135,6 +199,44 @@ class TestDecisionServer(unittest.TestCase):
         self.assertEqual({row["id"] for row in self.dataset["cases"]}, {row["id"] for row in self.input_cases})
         self.assertIn("manifest", self.dataset)
         self.assertIn("defaults", self.dataset)
+        self.assertEqual(self.dataset["defaults"]["proxy_mode"], "direct")
+
+    def test_default_and_explicit_direct_modes_ignore_proxy_environment(self):
+        with self.proxy_environment():
+            for config in ({}, {"proxy_mode": "direct"}):
+                with self.subTest(config=config):
+                    self.upstream.requests = []
+                    status, body = self.run_case(**config)
+                    self.assertEqual((status, body["status"]), (200, "ok"))
+                    self.assertEqual(body["score"], 0.8)
+                    self.assertEqual(len(self.upstream.requests), 1)
+                    self.assertEqual(self.upstream.requests[0]["path"], "/v1/systemone/")
+                    self.assertEqual(self.proxy.requests, [])
+
+    def test_system_proxy_mode_reports_the_proxy_504(self):
+        with self.proxy_environment():
+            body = self.assert_failed_run(self.run_case(proxy_mode="system"))
+        self.assertEqual(body["http_status"], 504)
+        self.assertEqual(body["raw_response"], {"error": "local proxy generated 504"})
+        self.assertEqual(len(self.proxy.requests), 1)
+        self.assertEqual(self.proxy.requests[0]["path"], self.endpoint)
+        self.assertEqual(self.upstream.requests, [])
+
+    def test_system_proxy_mode_honors_no_proxy_for_target(self):
+        with self.proxy_environment(no_proxy="127.0.0.1"):
+            status, body = self.run_case(proxy_mode="system")
+        self.assertEqual((status, body["status"]), (200, "ok"))
+        self.assertEqual(body["score"], 0.8)
+        self.assertEqual(len(self.upstream.requests), 1)
+        self.assertEqual(self.proxy.requests, [])
+
+    def test_invalid_proxy_modes_are_rejected_before_network(self):
+        for mode in ("auto", "", "DIRECT", None, True, 1, [], {}):
+            with self.subTest(proxy_mode=mode):
+                status, _body = self.run_case(proxy_mode=mode)
+                self.assertEqual(status, 400)
+        self.assertEqual(self.upstream.requests, [])
+        self.assertEqual(self.proxy.requests, [])
 
     def test_wire_body_is_direct_request_without_gold_or_metadata(self):
         status, body = self.run_case(api_key="local-test-key")
@@ -150,7 +252,7 @@ class TestDecisionServer(unittest.TestCase):
         sent = self.upstream.requests[0]
         self.assertEqual(sent["path"], "/v1/systemone/")
         self.assertEqual(sent["headers"].get("Authorization"), "Bearer local-test-key")
-        expected = json.loads((DATA_ROOT / "inputs/requests" / (self.case_id + ".json")).read_text())
+        expected = json.loads((DATA_ROOT / "inputs/requests" / (self.case_id + ".json")).read_text(encoding="utf-8"))
         expected["model"] = "custom-model"
         self.assertEqual(sent["body"], expected)
         self.assertEqual(set(sent["body"]), {"state", "model", "questions"})

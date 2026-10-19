@@ -30,11 +30,12 @@
           <label class="field"><span>API key <span class="optional">可选</span></span><input id="api-key" name="api-key" type="password" placeholder="无需鉴权可留空" autocomplete="off" spellcheck="false"><small>仅本次页面使用，不写入导出文件</small></label>
         </div>
         <details class="advanced">
-          <summary>高级设置 <span class="summary-hint">阈值与超时</span></summary>
+          <summary>高级设置 <span class="summary-hint"><span id="proxy-summary">默认直连（不使用代理）</span> · 阈值与超时</span></summary>
           <div class="advanced-content">
+            <label class="field proxy-field"><span>代理模式</span><select id="proxy-mode" name="proxy-mode"><option value="direct">直连（不使用代理）</option><option value="system">使用环境 / 系统代理</option></select></label>
             <label class="field"><span>有漏洞判定阈值</span><input id="threshold" name="threshold" type="number" min="0" max="1" step="any" value="0.5" required></label>
             <label class="field"><span>单次超时（秒）</span><input id="timeout" name="timeout" type="number" min="1" max="300" step="1" value="60" required></label>
-            <p class="advanced-note">响应中 <code>has_vulnerability</code> 的 <code>noul</code> 分值 ≥ 阈值时，判为有漏洞。请求按顺序执行。</p>
+            <p class="advanced-note">默认直连，不读取代理配置；需要代理时可手动选择使用环境 / 系统代理。响应中 <code>has_vulnerability</code> 的 <code>noul</code> 分值 ≥ 阈值时，判为有漏洞。请求按顺序执行。</p>
           </div>
         </details>
       </form>
