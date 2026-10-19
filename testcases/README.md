@@ -2,20 +2,22 @@
 
 当前收集方向：**代码片段是否存在漏洞**。
 
-目前提供两个测试集合，每个集合均包含相同的 48 条代码片段、24 条正例和 24 条反例，以 Java 为主，兼顾 Python、C、JavaScript，覆盖 12 类 CWE。两个集合用于对比提问方式，共有 48 个独立片段。
+目前提供三个测试集合。前两个集合共享 48 条代码片段（24 正 / 24 负），用于对比提问方式；新增集合从本地 KnowledgeWorkFlow 知识库随机抽取 100 个不同 CVE，使用实际漏洞版本源码，按指定 CWE 判断。
 
 | 集合 | 说明 | 可直接发送的请求 |
 |---|---|---|
 | `baseline` · 原始提问集合 | 保留原有请求；OWASP 样本判断目标 CWE，原创样本判断给定前提下是否存在漏洞 | [请求 JSONL](code_vulnerability/collections/baseline/inputs/requests.jsonl) |
 | `cwe_specific` · 漏洞类型细化集合 | 全部限定具体 CWE，增加该类型的定义、成立条件和排除条件 | [请求 JSONL](code_vulnerability/collections/cwe_specific/inputs/requests.jsonl) |
+| `cve_random_100` · 知识库 CVE 随机 100 | 100 个不同 CVE，仅正样本，主要评估检出率与漏报 | [请求 JSONL](code_vulnerability/collections/cve_random_100/inputs/requests.jsonl) |
 
-在 Web 测试端的“测试集合”中切换。每个集合独立存放输入、标准答案、请求和清单，代码及样本 ID 保持一致，便于逐例比较；共享来源和构建脚本保留在 `code_vulnerability/sources/`、`code_vulnerability/scripts/`。
+在 Web 测试端的“测试集合”中切换。每个集合独立存放输入、标准答案、请求和清单，前两个集合的代码及样本 ID 保持一致，便于逐例比较；共享来源和构建脚本保留在 `code_vulnerability/sources/`、`code_vulnerability/scripts/`。
 
 - [使用说明与评估口径](code_vulnerability/README.md)
 - [原始集合索引（含答案）](code_vulnerability/collections/baseline/CATALOG.md)
 - [细化集合索引（含答案）](code_vulnerability/collections/cwe_specific/CATALOG.md)
+- [100 CVE 索引（含答案）](code_vulnerability/collections/cve_random_100/CATALOG.md) · [抽样与证据说明](code_vulnerability/sources/knowledge_workflow/README.md)
 - [本地单页 Web 测试端](web/README.md)：配置完整 API 地址、可选 API Key 与模型名称，逐条或批量测试
-- 每个集合的 `inputs/requests/` 包含 48 个独立请求 JSON，`inputs/requests.index.json` 对应 ID 和行号。
+- 每个集合的 `inputs/requests/` 包含与集合用例数一致的独立请求 JSON，`inputs/requests.index.json` 对应 ID 和行号。
 - 每个集合的 `inputs/cases.jsonl` 包含结构化代码与上下文，`inputs/prompts.jsonl` 提供兼容文本模型的提问。
 - 每个集合的 `gold/answers.jsonl` 保存标准答案、依据和来源。
 

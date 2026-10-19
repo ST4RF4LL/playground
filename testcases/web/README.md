@@ -12,7 +12,7 @@ Windows 下可在仓库根目录运行 `python testcases/web/server.py`。数据
 
 ## 使用
 
-先在页面上方选择**测试集合**：`baseline` 保留原始提问，`cwe_specific` 使用相同 48 条代码、ID 和标签，统一判断某个具体 CWE，并增加该类别的成立及排除条件。切换集合会清空当前页面的结果和指标，请先导出需要保留的结果；API、模型、密钥、阈值、超时与代理配置会保留。运行期间不能切换集合。
+先在页面上方选择**测试集合**：`baseline` 保留原始提问，`cwe_specific` 使用相同 48 条代码、ID 和标签，统一判断某个具体 CWE，并增加该类别的成立及排除条件。`cve_random_100` 是从本地知识库抽取的 100 个不同 CVE，仅含漏洞版本，主要看检出率和漏报，不能用于估计误报率。新增集合后需重启服务。切换集合会清空当前页面的结果和指标，请先导出需要保留的结果；API、模型、密钥、阈值、超时与代理配置会保留。运行期间不能切换集合。
 
 1. 填写 **Decision-model API** 完整地址，例如 `https://api.typesafe.ai/v1/systemone` 或自建服务的 `http://127.0.0.1:8000/v1/systemone/`。程序原样发送，不额外拼接路径。
 2. 填写 **模型名称**，默认 `jev-latest`。**API Key 可选**：填写后使用 `Authorization: Bearer ...`；留空不发送该请求头。TypeSafe 官方云服务需要密钥，允许匿名的兼容服务可以留空。
@@ -48,7 +48,7 @@ HTTP 错误、超时、非法 JSON、缺失分数或越界分数全部记为错�
 
 每批开始时固定配置与待测集合，顺序发送请求。**停止**只停止后续调度，已发出的请求会等待完成或超时并保留结果。重新运行会开始新一批，请先导出需要保留的结果。不会自动重试，避免重复计费。
 
-两个集合的样本 ID 相同，结果需要同时使用 `collection_id` 与样本 ID 关联。导出文件名含集合 ID，结果 JSONL 的每一行包含 `collection_id`，指标 JSON 记录集合及请求版本；请求 JSONL 仍是可直接发送的纯 body。离线评分时通过 `score.py --collection <集合 ID>` 选择对应答案。对比提问效果时应使用相同模型、阈值和用例范围；新增集合不会自动提高准确率，需实际复测。
+前两个集合的样本 ID 相同，结果需要同时使用 `collection_id` 与样本 ID 关联。导出文件名含集合 ID，结果 JSONL 的每一行包含 `collection_id`，指标 JSON 记录集合及请求版本；请求 JSONL 仍是可直接发送的纯 body。离线评分时通过 `score.py --collection <集合 ID>` 选择对应答案。对比提问效果时应使用相同模型、阈值和用例范围；新增集合不会自动提高准确率，需实际复测。
 
 本地接口：`GET /api/collections` 列出集合；`GET /api/dataset?collection_id=...` 读取一个集合（省略时为 `baseline`）；`POST /api/run` 和 `POST /api/score` 均要求顶层 `collection_id`。评分请求中每条预测也必须带相同的 `collection_id`，缺失或跨集合数据会被拒绝。
 

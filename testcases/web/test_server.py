@@ -25,6 +25,7 @@ import urllib.request as urllib_request
 WEB_ROOT = Path(__file__).resolve().parent
 DATA_ROOT = WEB_ROOT.parent / "code_vulnerability"
 BASELINE_ROOT = DATA_ROOT / "collections" / "baseline"
+COLLECTION_SIZES = {"baseline": 48, "cwe_specific": 48, "cve_random_100": 100}
 LOCAL_HTTP = build_opener(ProxyHandler({}))
 
 
@@ -48,7 +49,7 @@ class TestUtf8DataLoading(unittest.TestCase):
         """Reproduce non-UTF-8 Windows defaults without opening a listening socket."""
         module = load_server_module()
         expected = {}
-        for collection_id in ("baseline", "cwe_specific"):
+        for collection_id in COLLECTION_SIZES:
             collection_root = DATA_ROOT / "collections" / collection_id
             cases_path = collection_root / "inputs/cases.jsonl"
             gold_path = collection_root / "gold/answers.jsonl"
@@ -71,17 +72,18 @@ class TestUtf8DataLoading(unittest.TestCase):
             with patch.object(module, "DATASET_ROOT", dataset), patch.object(Path, "read_text", gbk_default_read_text), patch.object(ThreadingHTTPServer, "__init__", return_value=None):
                 server = module.create_server(host="127.0.0.1", port=0)
 
-        self.assertEqual(set(server.collections), {"baseline", "cwe_specific"})
+        self.assertEqual(set(server.collections), set(COLLECTION_SIZES))
         for collection_id, data in expected.items():
             with self.subTest(collection_id=collection_id):
                 loaded = server.collections[collection_id]
-                self.assertEqual(len(loaded["cases"]), 48)
-                self.assertEqual(len(loaded["gold"]), 48)
+                self.assertEqual(len(loaded["cases"]), COLLECTION_SIZES[collection_id])
+                self.assertEqual(len(loaded["gold"]), COLLECTION_SIZES[collection_id])
                 self.assertEqual(loaded["cases"], data["cases"])
                 self.assertEqual(loaded["gold"], data["gold"])
                 self.assertEqual(loaded["manifest"], data["manifest"])
-                self.assertIn("攻击者", loaded["cases"]["cv_ec63ace1718b"]["context"])
-                self.assertEqual(loaded["gold"]["cv_ec63ace1718b"]["title"], "PreparedStatement 与动态排序字段")
+                if collection_id in ("baseline", "cwe_specific"):
+                    self.assertIn("攻击者", loaded["cases"]["cv_ec63ace1718b"]["context"])
+                    self.assertEqual(loaded["gold"]["cv_ec63ace1718b"]["title"], "PreparedStatement 与动态排序字段")
 
 
 class TestCollectionDiscovery(unittest.TestCase):
@@ -98,7 +100,7 @@ class TestCollectionDiscovery(unittest.TestCase):
             manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
             with patch.object(module, "DATASET_ROOT", dataset), patch.object(ThreadingHTTPServer, "__init__", return_value=None):
                 server = module.create_server(host="127.0.0.1", port=0)
-        self.assertEqual(set(server.collections), {"baseline", "cwe_specific", "extra_collection"})
+        self.assertEqual(set(server.collections), set(COLLECTION_SIZES) | {"extra_collection"})
         added_collection = server.collections["extra_collection"]
         self.assertEqual(added_collection["metadata"]["id"], "extra_collection")
         self.assertEqual(added_collection["metadata"]["count"], 48)
@@ -232,10 +234,10 @@ class TestDecisionServer(unittest.TestCase):
                 parsed = content
             return response.status, parsed
 
-    def run_case(self, collection_id="baseline", **config):
+    def run_case(self, collection_id="baseline", case_id=None, **config):
         merged = {"endpoint": self.endpoint, "api_key": "", "model": "custom-model", "threshold": 0.5, "timeout": 2}
         merged.update(config)
-        return self.request("/api/run", {"collection_id": collection_id, "case_id": self.case_id, "config": merged})
+        return self.request("/api/run", {"collection_id": collection_id, "case_id": case_id or self.case_id, "config": merged})
 
     def assert_failed_run(self, result):
         status, body = result
@@ -258,16 +260,65 @@ class TestDecisionServer(unittest.TestCase):
         status, listing = self.request("/api/collections")
         self.assertEqual(status, 200)
         self.assertEqual(listing["default_collection_id"], "baseline")
-        self.assertEqual([row["id"] for row in listing["collections"]], ["baseline", "cwe_specific"])
+        self.assertEqual([row["id"] for row in listing["collections"]], sorted(COLLECTION_SIZES))
         self.assertEqual(listing["collections"], self.dataset["collections"])
         for metadata in listing["collections"]:
             with self.subTest(collection_id=metadata["id"]):
-                self.assertEqual(metadata["count"], 48)
+                self.assertEqual(metadata["count"], COLLECTION_SIZES[metadata["id"]])
                 status, dataset = self.request("/api/dataset?" + urlencode({"collection_id": metadata["id"]}))
                 self.assertEqual(status, 200)
                 self.assertEqual(dataset["collection"], metadata)
                 self.assertEqual(dataset["manifest"]["collection"]["id"], metadata["id"])
-                self.assertEqual(len(dataset["cases"]), 48)
+                self.assertEqual(len(dataset["cases"]), COLLECTION_SIZES[metadata["id"]])
+
+    def test_cve_collection_exposes_100_positive_cases_and_sends_preview_body(self):
+        collection_id = "cve_random_100"
+        status, dataset = self.request("/api/dataset?collection_id=" + collection_id)
+        self.assertEqual(status, 200)
+        self.assertEqual(dataset["collection"]["id"], collection_id)
+        self.assertEqual(dataset["collection"]["request_profile"], "baseline")
+        self.assertIsNone(dataset["collection"]["cloned_from"])
+        cases = dataset["cases"]
+        self.assertEqual(len(cases), 100)
+        self.assertEqual(len({case["id"] for case in cases}), 100)
+        self.assertTrue(all(case["expected"] == "vulnerable" for case in cases))
+        self.assertFalse({case["id"] for case in cases} & {case["id"] for case in self.input_cases})
+        root = DATA_ROOT / "collections" / collection_id
+        for case in cases:
+            exported = json.loads((root / "inputs/requests" / (case["id"] + ".json")).read_text(encoding="utf-8"))
+            self.assertEqual(case["body"], exported)
+        for case in (cases[0], cases[-1]):
+            status, result = self.run_case(collection_id=collection_id, case_id=case["id"])
+            self.assertEqual((status, result["status"]), (200, "ok"))
+            self.assertEqual(result["collection_id"], collection_id)
+            self.assertEqual(result["id"], case["id"])
+            self.assertEqual(self.upstream.requests[-1]["body"], {**case["body"], "model": "custom-model"})
+
+    def test_cve_scoring_reports_recall_without_inventing_negative_metrics(self):
+        collection_id = "cve_random_100"
+        status, dataset = self.request("/api/dataset?collection_id=" + collection_id)
+        self.assertEqual(status, 200)
+        case_ids = [row["id"] for row in dataset["cases"]]
+        predictions = [{"collection_id": collection_id, "id": case_id, "verdict": "vulnerable"} for case_id in case_ids]
+        status, report = self.request("/api/score", {"collection_id": collection_id, "case_ids": case_ids, "predictions": predictions})
+        self.assertEqual(status, 200)
+        self.assertEqual(report["collection_id"], collection_id)
+        self.assertEqual(report["overall"]["total"], 100)
+        self.assertEqual(report["overall"]["actual_positive"], 100)
+        self.assertEqual(report["overall"]["actual_negative"], 0)
+        self.assertEqual(report["overall"]["primary"]["strict_recall"], 1)
+        self.assertEqual(report["overall"]["primary"]["strict_accuracy"], 1)
+        self.assertIsNone(report["overall"]["primary"]["strict_specificity"])
+        self.assertIsNone(report["overall"]["primary"]["strict_balanced_accuracy"])
+        self.assertIsNone(report["overall"]["conditional_on_binary_decisions"]["false_positive_rate"])
+        self.assertEqual(report["contrast_pairs"]["total"], 0)
+        predictions[0]["verdict"] = "not_vulnerable"
+        status, report = self.request("/api/score", {"collection_id": collection_id, "case_ids": case_ids, "predictions": predictions[:-1]})
+        self.assertEqual(status, 200)
+        self.assertEqual(report["overall"]["primary"]["strict_recall"], 0.98)
+        self.assertEqual(report["overall"]["counts"]["tp"], 98)
+        self.assertEqual(report["overall"]["counts"]["fn"], 1)
+        self.assertEqual(report["overall"]["counts"]["missing"], 1)
 
     def test_dataset_rejects_unknown_empty_and_traversal_collection_ids(self):
         for collection_id in ("unknown", "", "..", "../baseline", "baseline/../cwe_specific", "/baseline", "baseline\\..\\cwe_specific", "%2e%2e%2fbaseline"):
