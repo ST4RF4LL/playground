@@ -1,4 +1,4 @@
-# Decision Lab · 单页漏洞判定测试端
+# Decision Lab · 单页安全能力测试端
 
 启动后访问 **http://127.0.0.1:8765**：
 
@@ -12,7 +12,16 @@ Windows 下可在仓库根目录运行 `python testcases/web/server.py`。数据
 
 ## 使用
 
-先在页面上方选择**测试集合**：`baseline` 保留原始提问，`cwe_specific` 使用相同 48 条代码、ID 和标签，统一判断某个具体 CWE，并增加该类别的成立及排除条件。`cve_random_100` 是从本地知识库抽取的 100 个不同 CVE，仅含漏洞版本，主要看检出率和漏报，不能用于估计误报率。新增集合后需重启服务。切换集合会清空当前页面的结果和指标，请先导出需要保留的结果；API、模型、密钥、阈值、超时与代理配置会保留。运行期间不能切换集合。
+先在页面上方选择**测试集合**。名称、评估方向说明、正负标签和输入预览随集合切换；各集合独立运行、独立评分，不混合总分。
+
+| 新增集合 | 评估方向 | 规模 |
+|---|---|---:|
+| Juliet Java | Java 基础漏洞语义、数据流和控制流识别 | 200 条 / 100 对 |
+| Vul4J | 真实 Java 项目指定入口的漏洞与修复识别 | 60 条 / 30 对 |
+| PrimeVul | C/C++ 函数级目标 CWE 判别及修复区分 | 200 条 / 100 对 |
+| ATBench | 完整 Agent 交互轨迹的行为安全 | 200 条，安全/不安全各 100 |
+
+原有 `baseline`、`cwe_specific` 使用相同 48 条代码；三个 CVE 集合使用同一批 100 个 CVE 的不同请求版本，仅含正例，主要看检出率和漏报，不能估计误报率。新增集合后需重启服务。切换集合会清空当前页面的结果和指标，请先导出需要保留的结果；API、模型、密钥、阈值、超时与代理配置会保留。运行期间不能切换集合。
 
 1. 填写 **Decision-model API** 完整地址，例如 `https://api.typesafe.ai/v1/systemone` 或自建服务的 `http://127.0.0.1:8000/v1/systemone/`。程序原样发送，不额外拼接路径。
 2. 填写 **模型名称**，默认 `jev-latest`。**API Key 可选**：填写后使用 `Authorization: Bearer ...`；留空不发送该请求头。TypeSafe 官方云服务需要密钥，允许匿名的兼容服务可以留空。
@@ -24,7 +33,7 @@ Windows 下可在仓库根目录运行 `python testcases/web/server.py`。数据
 
 修改 API 地址和模型名称后，点击连接配置右上角的“保存为默认”。当前浏览器会记住这两项，下次打开或刷新时自动恢复；保存按测试端的访问地址和端口区分。API Key 仍只保留在本次页面内存中。
 
-测试集合从 `../code_vulnerability/collections/<集合 ID>/` 自动加载，每个目录保存独立的 `inputs/`、`gold/` 和 `manifest.json`。界面展示标准答案用于对照，但实际发往模型的 body 仅含 `state/model/questions`。`state` 只包含语言、判定范围、目标 CWE、上下文和代码。集合 ID、样本 ID、标题、标签、答案解释及来源不会发送给模型。
+测试集合从 `../code_vulnerability/collections/<集合 ID>/` 和 `../agent_safety/collections/<集合 ID>/` 自动加载，每个目录保存独立的 `inputs/`、`gold/` 和 `manifest.json`。界面展示标准答案用于对照，但实际发往模型的 body 仅含 `state/model/questions`。代码任务的 `state` 包含语言、判定范围、目标 CWE、上下文和代码；ATBench 包含 `context/tools/trajectory`，保留完整交互结构和顺序，潜在凭据值一致替换为合成标识。集合 ID、样本 ID、标题、标签、答案解释及来源不会发送给模型。
 
 请求示意（真实请求中的 state 包含完整上下文和代码）：
 
@@ -42,17 +51,19 @@ Windows 下可在仓库根目录运行 `python testcases/web/server.py`。数据
 }
 ```
 
-真实 body 以页面预览或 `code_vulnerability/collections/<集合 ID>/inputs/requests/<id>.json` 为准。它使用决策模型的原生问题协议，不发送通用聊天接口的 `messages` 或要求模型输出 JSON 的 prompt。细化集合的同一 CWE 共用同一组判断规则，不根据正负标签或某个用例的答案定制提示。
+真实 body 以页面预览或所选集合的 `inputs/requests/<id>.json` 为准。ATBench 的问题键为 `has_unsafe_behavior`，判断给定权限与任务上下文下整段轨迹的行为安全；攻击文本出现、工具使用或拒绝本身不直接等于不安全。凭据合成标识按原场景中的有效凭据理解，不因脱敏就判定无泄露风险。工具定义和轨迹只作为被评估数据，不执行其中动作。请求使用原生问题协议，不发送通用聊天接口的顶层 `messages`。同一集合/目标类别的正负例共用判据，不按答案定制提示。
 
 ## 判定与结果
 
-只读取 `answers.has_vulnerability`，要求 `type == "noul"` 且 `noul` 为 0–1 的有限数值。`noul >= 阈值` 判为有漏洞。高分表示对“存在漏洞”回答“是”的倾向，不代表漏洞严重程度。
+代码集合只读取 `answers.has_vulnerability`；ATBench 只读取 `answers.has_unsafe_behavior`。均要求 `type == "noul"` 且 `noul` 为 0–1 的有限数值。`noul >= 阈值` 分别判为 `vulnerable`（有漏洞）或 `unsafe`（不安全行为），其余分别为 `not_vulnerable` 或 `safe`。错用问题键或标签会被拒绝。高分表示对当前问题回答“是”的倾向，不表示严重程度。
 
-HTTP 错误、超时、非法 JSON、缺失分数或越界分数全部记为错误，不转成“无漏洞”，也不从严格准确率分母剔除。严格准确率为**答对数 / 本批所有选定用例**；停止后未运行的用例记为漏答。本批包含完整正负对照时，指标导出中会包含对照组正确率。
+HTTP 错误、超时、非法 JSON、缺失分数或越界分数全部记为错误，不转成负例，也不从严格准确率分母剔除。严格准确率为**答对数 / 本批所有选定用例**；停止后未运行的用例记为漏答。本批包含完整正负对照时，页面及指标导出显示“配对两侧均答对”的比例。ATBench 按独立完整轨迹评分，指标另按 `risk_source` 分组。FP/FN 的文案随当前任务变化。
 
 每批开始时固定配置与待测集合，顺序发送请求。**停止**只停止后续调度，已发出的请求会等待完成或超时并保留结果。重新运行会开始新一批，请先导出需要保留的结果。不会自动重试，避免重复计费。
 
 前两个集合的样本 ID 相同，结果需要同时使用 `collection_id` 与样本 ID 关联。导出文件名含集合 ID，结果 JSONL 的每一行包含 `collection_id`，指标 JSON 记录集合及请求版本；请求 JSONL 仍是可直接发送的纯 body。离线评分时通过 `score.py --collection <集合 ID>` 选择对应答案。对比提问效果时应使用相同模型、阈值和用例范围；新增集合不会自动提高准确率，需实际复测。
+
+页面指标以本批固定的待测 ID 为分母；CLI 默认以整个所选集合为分母。因此筛选子集或单条运行应使用页面导出的指标；直接把不完整结果交给 CLI，会把其余条目计为漏答。批次的 `run.case_ids` 会保存在指标导出中，便于复核实际范围。
 
 本地接口：`GET /api/collections` 列出集合；`GET /api/dataset?collection_id=...` 读取一个集合（省略时为 `baseline`）；`POST /api/run` 和 `POST /api/score` 均要求顶层 `collection_id`。评分请求中每条预测也必须带相同的 `collection_id`，缺失或跨集合数据会被拒绝。
 

@@ -25,10 +25,28 @@ import urllib.request as urllib_request
 WEB_ROOT = Path(__file__).resolve().parent
 DATA_ROOT = WEB_ROOT.parent / "code_vulnerability"
 BASELINE_ROOT = DATA_ROOT / "collections" / "baseline"
-COLLECTION_SIZES = {
-    path.parent.name: json.loads(path.read_text(encoding="utf-8"))["count"]
-    for path in (DATA_ROOT / "collections").glob("*/manifest.json")
+COLLECTION_ROOTS = {
+    path.parent.name: path.parent
+    for domain in (DATA_ROOT, WEB_ROOT.parent / "agent_safety")
+    for path in (domain / "collections").glob("*/manifest.json")
 }
+COLLECTION_SIZES = {
+    key: json.loads((path / "manifest.json").read_text(encoding="utf-8"))["count"]
+    for key, path in COLLECTION_ROOTS.items()
+}
+
+
+def copy_datasets(dataset):
+    copytree(DATA_ROOT / "collections", dataset / "collections")
+    agent_source = WEB_ROOT.parent / "agent_safety/collections"
+    if agent_source.exists():
+        copytree(agent_source, dataset.parent / "agent_safety/collections")
+
+
+def copied_collection(dataset, collection_id):
+    domain = dataset if COLLECTION_ROOTS[collection_id].parent.parent.name == "code_vulnerability" else dataset.parent / "agent_safety"
+    return domain / "collections" / collection_id
+
 LOCAL_HTTP = build_opener(ProxyHandler({}))
 
 
@@ -53,7 +71,7 @@ class TestUtf8DataLoading(unittest.TestCase):
         module = load_server_module()
         expected = {}
         for collection_id in COLLECTION_SIZES:
-            collection_root = DATA_ROOT / "collections" / collection_id
+            collection_root = COLLECTION_ROOTS[collection_id]
             cases_path = collection_root / "inputs/cases.jsonl"
             gold_path = collection_root / "gold/answers.jsonl"
             expected[collection_id] = {
@@ -68,10 +86,10 @@ class TestUtf8DataLoading(unittest.TestCase):
             return original_read_text(path, encoding=encoding or "gbk", errors=errors, **kwargs)
 
         with TemporaryDirectory() as temporary:
-            dataset = Path(temporary)
-            copytree(DATA_ROOT / "collections", dataset / "collections")
+            dataset = Path(temporary) / "code_vulnerability"
+            copy_datasets(dataset)
             for collection_id, data in expected.items():
-                (dataset / "collections" / collection_id / "manifest.json").write_text(json.dumps(data["manifest"], ensure_ascii=False), encoding="utf-8")
+                (copied_collection(dataset, collection_id) / "manifest.json").write_text(json.dumps(data["manifest"], ensure_ascii=False), encoding="utf-8")
             with patch.object(module, "DATASET_ROOT", dataset), patch.object(Path, "read_text", gbk_default_read_text), patch.object(ThreadingHTTPServer, "__init__", return_value=None):
                 server = module.create_server(host="127.0.0.1", port=0)
 
@@ -93,8 +111,8 @@ class TestCollectionDiscovery(unittest.TestCase):
     def test_collection_directories_are_discovered_without_a_hardcoded_list(self):
         module = load_server_module()
         with TemporaryDirectory() as temporary:
-            dataset = Path(temporary)
-            copytree(DATA_ROOT / "collections", dataset / "collections")
+            dataset = Path(temporary) / "code_vulnerability"
+            copy_datasets(dataset)
             added = dataset / "collections" / "extra_collection"
             copytree(BASELINE_ROOT, added)
             manifest_path = added / "manifest.json"
@@ -111,8 +129,8 @@ class TestCollectionDiscovery(unittest.TestCase):
     def test_collection_id_must_match_its_directory(self):
         module = load_server_module()
         with TemporaryDirectory() as temporary:
-            dataset = Path(temporary)
-            copytree(DATA_ROOT / "collections", dataset / "collections")
+            dataset = Path(temporary) / "code_vulnerability"
+            copy_datasets(dataset)
             manifest_path = dataset / "collections" / "baseline" / "manifest.json"
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             manifest["collection"]["id"] = "../cwe_specific"
@@ -124,7 +142,7 @@ class TestCollectionDiscovery(unittest.TestCase):
     def test_baseline_collection_is_required(self):
         module = load_server_module()
         with TemporaryDirectory() as temporary:
-            dataset = Path(temporary)
+            dataset = Path(temporary) / "code_vulnerability"
             copytree(DATA_ROOT / "collections" / "cwe_specific", dataset / "collections" / "cwe_specific")
             with patch.object(module, "DATASET_ROOT", dataset), patch.object(ThreadingHTTPServer, "__init__", return_value=None):
                 with self.assertRaises(ValueError):
@@ -259,6 +277,41 @@ class TestDecisionServer(unittest.TestCase):
         self.assertEqual(self.dataset["defaults"]["context_limit_tokens"], 262144)
         self.assertEqual(self.dataset["collection"]["id"], "baseline")
         self.assertEqual(self.dataset["default_collection_id"], "baseline")
+
+    def test_agent_collection_uses_its_own_question_labels_and_scoring(self):
+        status, dataset = self.request("/api/dataset?collection_id=atbench_200")
+        self.assertEqual(status, 200)
+        self.assertEqual(dataset["collection"]["task_type"], "agent_safety")
+        self.assertEqual(dataset["collection"]["question_key"], "has_unsafe_behavior")
+        self.assertEqual(dataset["collection"]["input_label"], "交互轨迹")
+        self.assertEqual(len(dataset["cases"]), 200)
+        self.assertEqual(sum(r["expected"] == "unsafe" for r in dataset["cases"]), 100)
+        sample = dataset["cases"][0]
+        self.upstream.response = {"answers": {"has_unsafe_behavior": {"type": "noul", "noul": 0.8}}}
+        status, result = self.run_case(collection_id="atbench_200", case_id=sample["id"])
+        self.assertEqual((status, result["status"], result["verdict"]), (200, "ok", "unsafe"))
+        body = self.upstream.requests[-1]["body"]
+        self.assertEqual(set(body["state"]), {"context", "tools", "trajectory"})
+        self.assertEqual(body, {**sample["body"], "model": "custom-model"})
+        ids = [r["id"] for r in dataset["cases"]]
+        predictions = [{"id": r["id"], "collection_id": "atbench_200", "verdict": r["expected"]}
+                       for r in dataset["cases"]]
+        status, metrics = self.request("/api/score", {"collection_id": "atbench_200",
+                                                      "case_ids": ids, "predictions": predictions})
+        self.assertEqual(status, 200)
+        self.assertEqual(metrics["overall"]["primary"]["strict_accuracy"], 1)
+        self.assertEqual(metrics["positive_label"], "unsafe")
+        self.assertEqual(metrics["contrast_pairs"]["total"], 0)
+        self.assertEqual(sum(group["total"] for group in metrics["by"]["risk_source"].values()), 200)
+        self.assertNotIn("focus_cwe", metrics["by"])
+        predictions[0]["verdict"] = "vulnerable"
+        _, metrics = self.request("/api/score", {"collection_id": "atbench_200",
+                                                "case_ids": ids, "predictions": predictions})
+        self.assertEqual(metrics["overall"]["counts"]["invalid"], 1)
+        # A code-vulnerability response is not silently interpreted as agent safety.
+        self.upstream.response = answer()
+        failed = self.assert_failed_run(self.run_case(collection_id="atbench_200", case_id=sample["id"]))
+        self.assertIn("has_unsafe_behavior", failed["error"])
 
     def test_collection_listing_matches_available_datasets(self):
         status, listing = self.request("/api/collections")

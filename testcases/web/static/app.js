@@ -10,6 +10,8 @@
     contextBudget: $("context-budget-note"),
     saveDefaults: $("save-defaults"), defaultsStatus: $("defaults-status"),
     collection: $("collection-selector"), collectionDescription: $("collection-description"), collectionProfile: $("collection-profile"),
+    direction: $("evaluation-direction"), thresholdLabel: $("threshold-label"), questionNote: $("question-note"),
+    errorTypes: $("error-types-note"), pairNote: $("pair-note"),
     run: $("run-button"), runLabel: $("run-label"), stop: $("stop-button"), single: $("run-single"),
     status: $("run-status"), statusText: $("status-text"), retry: $("retry-button"),
     search: $("search"), language: $("language-filter"), cwe: $("cwe-filter"), clear: $("clear-filters"),
@@ -53,8 +55,15 @@
   }
 
   function verdictLabel(verdict) {
-    return verdict === "vulnerable" ? "有漏洞" : verdict === "not_vulnerable" ? "无目标漏洞" : "无有效判断";
+    const meta = state.collection;
+    return verdict === positiveLabel() ? (meta?.positive_label_text || "有漏洞")
+      : verdict === negativeLabel() ? (meta?.negative_label_text || "无目标漏洞") : "无有效判断";
   }
+
+  function positiveLabel() { return state.collection?.positive_label || "vulnerable"; }
+  function negativeLabel() { return state.collection?.negative_label || "not_vulnerable"; }
+  function isAgentTask() { return state.collection?.task_type === "agent_safety"; }
+  function categoryLabel() { return state.collection?.category_label || "漏洞类别"; }
 
   function safeText(value) {
     return typeof value === "string" ? value : JSON.stringify(value, null, 2);
@@ -88,7 +97,7 @@
     if (!result) return { label: "待运行", kind: "" };
     if (result.status === "error") return { label: "错误", kind: "error" };
     if (result.verdict === expectedVerdict(item)) return { label: "一致", kind: "correct" };
-    return { label: result.verdict === "vulnerable" ? "误报 FP" : "漏报 FN", kind: "incorrect" };
+    return { label: result.verdict === positiveLabel() ? "误报 FP" : "漏报 FN", kind: "incorrect" };
   }
 
   function makeTag(label) {
@@ -125,9 +134,9 @@
       title.textContent = item.title;
       const meta = document.createElement("span");
       meta.className = "case-meta";
-      meta.append(makeTag(languageNames[item.language] || item.language), makeTag(item.focus_cwe));
+      meta.append(makeTag(item.language === "agent_trace" ? "Agent 轨迹" : languageNames[item.language] || item.language), makeTag(item.focus_cwe));
       const expected = document.createElement("span");
-      expected.className = `expected-mini${expectedVerdict(item) === "vulnerable" ? " positive" : ""}`;
+      expected.className = `expected-mini${expectedVerdict(item) === positiveLabel() ? " positive" : ""}`;
       expected.textContent = verdictLabel(expectedVerdict(item));
       meta.append(expected);
       main.append(title, meta);
@@ -163,7 +172,7 @@
     ui.detailTitle.textContent = item?.title || "暂无选中的用例";
     ui.detailTags.replaceChildren();
     if (item) {
-      ui.detailTags.append(makeTag(languageNames[item.language] || item.language), makeTag(item.focus_cwe));
+      ui.detailTags.append(makeTag(item.language === "agent_trace" ? "Agent 轨迹" : languageNames[item.language] || item.language), makeTag(item.focus_cwe));
       ui.detailTags.append(makeTag(item.suite === "owasp_target_cwe" ? "OWASP 基准" : item.suite === "curated_contrast" ? "成对对照" : item.suite));
     }
     ui.expected.textContent = item ? verdictLabel(expectedVerdict(item)) : "—";
@@ -188,7 +197,9 @@
       ui.previewNote.textContent = `直接发送的 System One 请求 · model: ${currentModel()} · 不包含标准答案`;
     } else if (state.tab === "code") {
       ui.preview.textContent = item.code;
-      ui.previewNote.textContent = "源码来自当前用例；环境约定与漏洞范围可在请求 Body 的 state 中查看。";
+      ui.previewNote.textContent = isAgentTask()
+        ? "完整工具定义与交互轨迹；评估整段 Agent 行为。标准答案和风险说明不会发送给模型。"
+        : "源码来自当前用例；环境约定与漏洞范围可在请求 Body 的 state 中查看。";
     } else if (result) {
       const details = [];
       if (result.http_status) details.push(`HTTP ${result.http_status}`);
@@ -212,7 +223,7 @@
       else if (result.status !== "ok") counts.errors += 1;
       else {
         const expected = expectedVerdict(state.caseMap.get(id));
-        const name = result.verdict === "vulnerable" ? expected === "vulnerable" ? "tp" : "fp" : expected === "not_vulnerable" ? "tn" : "fn";
+        const name = result.verdict === positiveLabel() ? expected === positiveLabel() ? "tp" : "fp" : expected === negativeLabel() ? "tn" : "fn";
         counts[name] += 1;
       }
     }
@@ -237,6 +248,10 @@
     ui.errors.textContent = counts.errors;
     ui.errors.classList.toggle("error", counts.errors > 0);
     ui.errorNote.textContent = counts.errors ? `${counts.errors} 条错误 · ${counts.missing} 条未答` : "错误与未答均计入准确率分母";
+    const pairs = state.metrics?.contrast_pairs;
+    ui.pairNote.textContent = pairs?.total
+      ? `完整配对均判对：${pairs.both_correct} / ${pairs.total}（${(pairs.both_correct_rate * 100).toFixed(1)}%）`
+      : isAgentTask() ? "按完整轨迹独立评分" : "配对指标在运行包含完整正负对的批次后显示";
   }
 
   function renderControls() {
@@ -248,11 +263,20 @@
     if (state.collection) {
       ui.collectionDescription.textContent = state.collection.description || state.collection.name;
       ui.collectionProfile.textContent = `${state.collection.count ?? state.cases.length} 条用例 · 切换集合会清空上批结果，保留连接配置。`;
+      ui.direction.textContent = `评估方向：${state.collection.evaluation_direction}`;
     } else {
       const pending = state.collections.find((item) => item.id === state.requestedCollectionId);
       ui.collectionDescription.textContent = state.loading ? `正在加载${pending ? `「${pending.name}」` : "测试集合"}，完成后即可运行。` : "集合加载失败，当前没有可运行的数据。请重试或切换集合。";
       ui.collectionProfile.textContent = "连接配置保持不变；只有成功加载后才能运行与导出。";
+      ui.direction.textContent = "评估方向：等待集合加载";
     }
+    $("tab-code").textContent = state.collection?.input_label || "源代码";
+    ui.search.placeholder = isAgentTask() ? "搜索标题、ID 或交互轨迹…" : "搜索标题、ID 或代码…";
+    ui.language.closest("label").hidden = isAgentTask();
+    ui.cwe.setAttribute("aria-label", `按${categoryLabel()}筛选`);
+    ui.thresholdLabel.textContent = `${verdictLabel(positiveLabel())}判定阈值`;
+    ui.questionNote.textContent = `分值 ≥ 阈值时判为“${verdictLabel(positiveLabel())}”。请求按顺序执行。`;
+    ui.errorTypes.textContent = isAgentTask() ? "FP：安全行为误报 · FN：不安全行为漏报" : "FP：无目标漏洞误报 · FN：目标漏洞漏报";
     for (const filter of [ui.search, ui.language, ui.cwe]) filter.disabled = state.loading || !state.cases.length;
     ui.run.disabled = state.running || state.loading || !state.collection || !state.filtered.length;
     ui.runLabel.textContent = state.loading ? "正在加载集合…" : state.running ? `运行中 ${state.results.size} / ${state.batch.ids.length}` : `运行当前用例 (${state.filtered.length})`;
@@ -382,7 +406,7 @@
         try {
           result = await post("/api/run", { collection_id: state.batch.collection_id, case_id: id, config });
           if (result.id !== id || result.collection_id !== state.batch.collection_id || !["ok", "error"].includes(result.status)) throw new Error("本地服务返回了不匹配的集合或用例结果。");
-          if (result.status === "ok" && (!["vulnerable", "not_vulnerable"].includes(result.verdict) || !Number.isFinite(result.score))) throw new Error("模型响应没有有效的判断或 noul 分值。");
+          if (result.status === "ok" && (![positiveLabel(), negativeLabel()].includes(result.verdict) || !Number.isFinite(result.score))) throw new Error("模型响应没有有效的判断或 noul 分值。");
         } catch (error) {
           result = { id, collection_id: state.batch.collection_id, status: "error", latency_ms: Math.round(performance.now() - started), error: error.message, raw_response: null };
         }
@@ -461,7 +485,7 @@
     state.scoringError = null;
     ui.search.value = "";
     ui.language.replaceChildren(new Option("全部语言", ""));
-    ui.cwe.replaceChildren(new Option("全部漏洞类别", ""));
+    ui.cwe.replaceChildren(new Option("全部类别", ""));
     ui.retry.hidden = true;
     ui.summary.textContent = "正在加载测试集合…";
     setStatus("正在读取测试集合…");
@@ -483,16 +507,17 @@
       state.requestedCollectionId = data.collection.id;
       state.cases = cases;
       state.caseMap = caseMap;
-      ui.collection.replaceChildren(...state.collections.map((item) => new Option(item.name, item.id)));
+      ui.collection.replaceChildren(...state.collections.map((item) => new Option(
+        `${item.name} · ${item.count} 条`, item.id)));
       ui.collection.value = state.collection.id;
       if (Number.isSafeInteger(data.defaults?.context_limit_tokens) && data.defaults.context_limit_tokens > 0) state.contextLimitTokens = data.defaults.context_limit_tokens;
       applyInitialDefaults(data.defaults || {});
       const languages = [...new Set(state.cases.map((item) => item.language))];
       const categories = [...new Set(state.cases.map((item) => item.focus_cwe))].sort((a, b) => a.localeCompare(b, "en", { numeric: true }));
       ui.language.replaceChildren(new Option("全部语言", ""), ...languages.map((language) => new Option(languageNames[language] || language, language)));
-      ui.cwe.replaceChildren(new Option("全部漏洞类别", ""), ...categories.map((cwe) => new Option(`${cwe}${cweNames[cwe] ? ` · ${cweNames[cwe]}` : ""}`, cwe)));
-      const positive = state.cases.filter((item) => expectedVerdict(item) === "vulnerable").length;
-      ui.summary.textContent = `${state.collection.name} · ${state.cases.length} 条用例 · ${languages.length} 种语言 · ${categories.length} 类漏洞 · 有漏洞 ${positive} / 无目标漏洞 ${state.cases.length - positive}`;
+      ui.cwe.replaceChildren(new Option(`全部${categoryLabel()}`, ""), ...categories.map((cwe) => new Option(`${cwe}${cweNames[cwe] ? ` · ${cweNames[cwe]}` : ""}`, cwe)));
+      const positive = state.cases.filter((item) => expectedVerdict(item) === positiveLabel()).length;
+      ui.summary.textContent = `${state.collection.name} · ${state.cases.length} 条用例 · ${isAgentTask() ? "完整交互轨迹" : `${languages.length} 种语言 · ${categories.length} 类漏洞`} · ${verdictLabel(positiveLabel())} ${positive} / ${verdictLabel(negativeLabel())} ${state.cases.length - positive}`;
       state.loading = false;
       state.loadController = null;
       applyFilters();

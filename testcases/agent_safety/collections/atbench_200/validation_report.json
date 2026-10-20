@@ -1,0 +1,10 @@
+{
+  "collection_id": "atbench_200",
+  "count": 200,
+  "pairs": 0,
+  "labels": {
+    "safe": 100,
+    "unsafe": 100
+  },
+  "requests_within_256k": true
+}

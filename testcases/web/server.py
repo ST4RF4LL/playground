@@ -19,7 +19,7 @@ import urllib.request
 HERE = Path(__file__).resolve().parent
 DATASET_ROOT = HERE.parent / "code_vulnerability"
 sys.path.insert(0, str(DATASET_ROOT / "scripts"))
-from decision_protocol import DEFAULT_MODEL, build_request, parse_noul
+from decision_protocol import DEFAULT_MODEL, build_request, parse_noul, question_key, verdict_labels
 from context_budget import CONTEXT_LIMIT_TOKENS, request_budget
 from score import evaluate, indexed, read_jsonl
 
@@ -157,9 +157,10 @@ def call_model(case, config, profile="baseline"):
             raise ValueError(f"上游返回 HTTP {result['http_status']}；请查看原始响应。")
         if not isinstance(parsed, dict):
             raise ValueError("上游未返回 JSON 对象；请确认使用 /v1/systemone 兼容接口。")
-        score = parse_noul(parsed)
+        score = parse_noul(parsed, question_key(profile))
+        positive, negative = verdict_labels(profile)
         result.update({"status": "ok", "score": score,
-                       "verdict": "vulnerable" if score >= config["threshold"] else "not_vulnerable",
+                       "verdict": positive if score >= config["threshold"] else negative,
                        "response_model": parsed.get("model") if isinstance(parsed.get("model"), str) else None})
     except (TimeoutError, socket.timeout):
         result["error"] = f"请求超时（{config['timeout']:g} 秒）。"
@@ -181,7 +182,11 @@ class BenchServer(ThreadingHTTPServer):
 
     def __init__(self, address):
         self.collections = {}
-        for root in sorted((DATASET_ROOT / "collections").iterdir()):
+        roots = list((DATASET_ROOT / "collections").iterdir())
+        agent_collections = DATASET_ROOT.parent / "agent_safety" / "collections"
+        if agent_collections.is_dir():
+            roots.extend(agent_collections.iterdir())
+        for root in sorted(roots):
             if not root.is_dir() or root.name.startswith("."):
                 continue
             manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
@@ -192,6 +197,8 @@ class BenchServer(ThreadingHTTPServer):
                            for key in ("name", "description", "request_profile"))):
                 raise ValueError(f"测试集合 {root.name} 的元数据无效。")
             profile = meta["request_profile"]
+            if root.name in self.collections:
+                raise ValueError(f"重复的测试集合 ID：{root.name}")
             cases = indexed(read_jsonl(root / "inputs/cases.jsonl"), "cases")
             gold = indexed(read_jsonl(root / "gold/answers.jsonl"), "gold")
             if not cases or set(cases) != set(gold) or manifest.get("count") != len(cases):
@@ -201,6 +208,20 @@ class BenchServer(ThreadingHTTPServer):
             for case in cases.values():
                 build_request(case, DEFAULT_MODEL, profile=profile)
             metadata = {key: meta.get(key) for key in ("id", "name", "description", "request_profile", "cloned_from")}
+            agent_task = profile == "agent_safety_v1"
+            metadata.update({
+                "task_type": "agent_safety" if agent_task else "code_vulnerability",
+                "evaluation_direction": meta.get("evaluation_direction") or "代码漏洞识别 · " + meta["name"],
+                "question_key": question_key(profile),
+                "positive_label": verdict_labels(profile)[0],
+                "negative_label": verdict_labels(profile)[1],
+                "positive_label_text": "不安全行为" if agent_task else "有漏洞",
+                "negative_label_text": "安全行为" if agent_task else "无目标漏洞",
+                "input_label": "交互轨迹" if agent_task else "源代码",
+                "category_label": "风险类别" if agent_task else "漏洞类别",
+            })
+            if any(row.get("verdict") not in verdict_labels(profile) for row in gold.values()):
+                raise ValueError(f"测试集合 {root.name} 的标签与评估方向不一致。")
             metadata["count"] = len(cases)
             self.collections[root.name] = {"metadata": metadata, "cases": cases,
                                            "gold": gold, "manifest": manifest, "profile": profile}
@@ -304,9 +325,13 @@ class BenchHandler(BaseHTTPRequestHandler):
             for key, row in collection["cases"].items():
                 answer = collection["gold"][key]
                 body = build_request(row, DEFAULT_MODEL, profile=collection["profile"])
-                cases.append({"id": key, "title": answer["title"], "language": row["language"],
-                              "focus_cwe": answer["focus_cwe"], "suite": answer["suite"],
-                              "expected": answer["verdict"], "context": row["context"], "code": row["code"],
+                agent_task = collection["profile"] == "agent_safety_v1"
+                preview = json.dumps({"tools": row["tools"], "trajectory": row["trajectory"]},
+                                     ensure_ascii=False, indent=2) if agent_task else row["code"]
+                cases.append({"id": key, "title": answer["title"], "language": row.get("language", "agent_trace"),
+                              "focus_cwe": answer.get("risk_source") or answer.get("focus_cwe") or "未指定", "suite": answer["suite"],
+                              "pair_id": answer.get("pair_id"),
+                              "expected": answer["verdict"], "context": row["context"], "code": preview,
                               "body": body, "context_budget": request_budget(body)})
             self.reply(200, {"cases": cases, "manifest": collection["manifest"], "defaults": DEFAULTS,
                              "collection": collection["metadata"], "collections": self.server.collection_list(),
@@ -372,7 +397,11 @@ class BenchHandler(BaseHTTPRequestHandler):
             for row in rows:
                 if row.get("pair_id") and pair_counts[row["pair_id"]] != 2:
                     row["pair_id"] = None
-            self.reply(200, evaluate(rows, predictions, collection_id=collection_id))
+            metrics = evaluate(rows, predictions, collection_id=collection_id,
+                               labels=verdict_labels(collection["profile"]))
+            metrics["evaluation_direction"] = collection["metadata"]["evaluation_direction"]
+            metrics["task_type"] = collection["metadata"]["task_type"]
+            self.reply(200, metrics)
         except (ValueError, TypeError) as exc:
             self.close_connection = True
             self.reply(400, {"error": str(exc)})
