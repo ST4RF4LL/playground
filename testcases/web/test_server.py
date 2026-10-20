@@ -25,7 +25,10 @@ import urllib.request as urllib_request
 WEB_ROOT = Path(__file__).resolve().parent
 DATA_ROOT = WEB_ROOT.parent / "code_vulnerability"
 BASELINE_ROOT = DATA_ROOT / "collections" / "baseline"
-COLLECTION_SIZES = {"baseline": 48, "cwe_specific": 48, "cve_random_100": 100}
+COLLECTION_SIZES = {
+    path.parent.name: json.loads(path.read_text(encoding="utf-8"))["count"]
+    for path in (DATA_ROOT / "collections").glob("*/manifest.json")
+}
 LOCAL_HTTP = build_opener(ProxyHandler({}))
 
 
@@ -253,6 +256,7 @@ class TestDecisionServer(unittest.TestCase):
         self.assertIn("manifest", self.dataset)
         self.assertIn("defaults", self.dataset)
         self.assertEqual(self.dataset["defaults"]["proxy_mode"], "direct")
+        self.assertEqual(self.dataset["defaults"]["context_limit_tokens"], 262144)
         self.assertEqual(self.dataset["collection"]["id"], "baseline")
         self.assertEqual(self.dataset["default_collection_id"], "baseline")
 
@@ -435,6 +439,7 @@ class TestDecisionServer(unittest.TestCase):
         self.assertEqual(body["score"], 0.8)
         self.assertEqual(body["http_status"], 200)
         self.assertEqual(body["response_model"], "mock-jev")
+        self.assertEqual(body["context_budget"], self.dataset["cases"][0]["context_budget"])
         self.assertGreaterEqual(body["latency_ms"], 0)
         self.assertEqual(len(self.upstream.requests), 1)
         sent = self.upstream.requests[0]
@@ -451,6 +456,30 @@ class TestDecisionServer(unittest.TestCase):
             self.assertNotIn(forbidden, sent["body"]["state"])
         self.assertEqual(set(sent["body"]["questions"]), {"has_vulnerability"})
         self.assertEqual(sent["body"]["questions"]["has_vulnerability"]["type"], "noul")
+
+    def test_context_budget_refuses_over_limit_without_truncating_or_sending(self):
+        case = dict(self.input_cases[0], code="x")
+        body = self.module.build_request(case, "custom-model")
+        budget = self.module.request_budget(body)
+        # Use non-ASCII input to distinguish UTF-8 bytes from character counts.
+        count = (budget["limit_tokens"] - budget["estimated_tokens_upper_bound"] + 1) // 3
+        for extra in (0, 1):
+            with self.subTest(over_budget=bool(extra)):
+                case["code"] = "界" * (count + extra)
+                before = json.dumps(case, ensure_ascii=False)
+                with patch.dict(self.app.collections["baseline"]["cases"], {self.case_id: case}):
+                    result = self.run_case()
+                self.assertEqual(json.dumps(case, ensure_ascii=False), before)
+                if extra:
+                    failed = self.assert_failed_run(result)
+                    self.assertFalse(failed["context_budget"]["within_budget"])
+                    self.assertIn("未发送，未截断", failed["error"])
+                    self.assertIsNone(failed["http_status"])
+                else:
+                    self.assertEqual(result[1]["status"], "ok")
+                    self.assertTrue(result[1]["context_budget"]["within_budget"])
+                    self.assertEqual(self.upstream.requests[-1]["body"]["state"]["code"], case["code"])
+        self.assertEqual(len(self.upstream.requests), 1)
 
     def test_optional_key_is_not_sent_and_custom_path_is_preserved(self):
         endpoint = self.endpoint.replace("/v1/systemone/", "/custom/nested/decision/?version=2")

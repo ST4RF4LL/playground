@@ -2,13 +2,15 @@
 
 当前收集方向：**代码片段是否存在漏洞**。
 
-目前提供三个测试集合。前两个集合共享 48 条代码片段（24 正 / 24 负），用于对比提问方式；新增集合从本地 KnowledgeWorkFlow 知识库随机抽取 100 个不同 CVE，使用实际漏洞版本源码，按指定 CWE 判断。
+目前提供五个测试集合。前两个集合共享 48 条代码片段（24 正 / 24 负），用于对比提问方式；后三个集合共享从本地 KnowledgeWorkFlow 知识库抽取的同一批 100 个 CVE（全部正例），分别比较原请求、详细 CWE 判据和聚焦代码。共 396 条集合条目，不是 396 个独立样本。
 
 | 集合 | 说明 | 可直接发送的请求 |
 |---|---|---|
 | `baseline` · 原始提问集合 | 保留原有请求；OWASP 样本判断目标 CWE，原创样本判断给定前提下是否存在漏洞 | [请求 JSONL](code_vulnerability/collections/baseline/inputs/requests.jsonl) |
 | `cwe_specific` · 漏洞类型细化集合 | 全部限定具体 CWE，增加该类型的定义、成立条件和排除条件 | [请求 JSONL](code_vulnerability/collections/cwe_specific/inputs/requests.jsonl) |
 | `cve_random_100` · 知识库 CVE 随机 100 | 100 个不同 CVE，仅正样本，主要评估检出率与漏报 | [请求 JSONL](code_vulnerability/collections/cve_random_100/inputs/requests.jsonl) |
+| `cve_cwe_specific_100` · CVE 100 · CWE 判据细化 | 相同代码、前提、ID 和标签，仅补齐 30 类 CWE 的具体判据 | [请求 JSONL](code_vulnerability/collections/cve_cwe_specific_100/inputs/requests.jsonl) |
+| `cve_focused_100` · CVE 100 · 判据细化＋聚焦代码 | 沿用详细判据，保留候选位置相关完整函数与依赖；无法可靠裁剪时保留原文件 | [请求 JSONL](code_vulnerability/collections/cve_focused_100/inputs/requests.jsonl) |
 
 在 Web 测试端的“测试集合”中切换。每个集合独立存放输入、标准答案、请求和清单，前两个集合的代码及样本 ID 保持一致，便于逐例比较；共享来源和构建脚本保留在 `code_vulnerability/sources/`、`code_vulnerability/scripts/`。
 

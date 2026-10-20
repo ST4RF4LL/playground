@@ -1,5 +1,9 @@
 # Source evidence retains upstream bytes; normalized snippets retain source lines.
 code_vulnerability/sources/knowledge_workflow/** -text
 code_vulnerability/collections/cve_random_100/** -text
+code_vulnerability/collections/cve_cwe_specific_100/** -text
+code_vulnerability/collections/cve_focused_100/** -text
 code_vulnerability/sources/knowledge_workflow/cases/** whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
 code_vulnerability/collections/cve_random_100/inputs/snippets/** whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
+code_vulnerability/collections/cve_cwe_specific_100/inputs/snippets/** whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
+code_vulnerability/collections/cve_focused_100/inputs/snippets/** whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab

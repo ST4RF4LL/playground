@@ -36,12 +36,12 @@
         </div>
         <p class="hint defaults-status" id="defaults-status" role="status">API 地址和模型名称可保存到当前浏览器；API key 不保存。</p>
         <details class="advanced">
-          <summary>高级设置 <span class="summary-hint"><span id="proxy-summary">默认直连（不使用代理）</span> · 阈值与超时</span></summary>
+          <summary>高级设置 <span class="summary-hint"><span id="proxy-summary">默认直连（不使用代理）</span> · 阈值与超时 · 256K 预算</span></summary>
           <div class="advanced-content">
             <label class="field proxy-field"><span>代理模式</span><select id="proxy-mode" name="proxy-mode"><option value="direct">直连（不使用代理）</option><option value="system">使用环境 / 系统代理</option></select></label>
             <label class="field"><span>有漏洞判定阈值</span><input id="threshold" name="threshold" type="number" min="0" max="1" step="any" value="0.5" required></label>
             <label class="field"><span>单次超时（秒）</span><input id="timeout" name="timeout" type="number" min="1" max="300" step="1" value="60" required></label>
-            <p class="advanced-note">默认直连，不读取代理配置；需要代理时可手动选择使用环境 / 系统代理。响应中 <code>has_vulnerability</code> 的 <code>noul</code> 分值 ≥ 阈值时，判为有漏洞。请求按顺序执行。</p>
+            <p class="advanced-note">默认直连，不读取代理配置；需要代理时可手动选择使用环境 / 系统代理。响应中 <code>has_vulnerability</code> 的 <code>noul</code> 分值 ≥ 阈值时，判为有漏洞。请求按顺序执行。<br><span id="context-budget-note">上下文预算 256K（262,144 token）；选择用例后显示保守估算，超预算时拒绝发送，不截断输入。</span></p>
           </div>
         </details>
       </form>

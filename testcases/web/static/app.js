@@ -7,6 +7,7 @@
     summary: $("dataset-summary"), form: $("config-form"), endpoint: $("endpoint"),
     model: $("model"), apiKey: $("api-key"), threshold: $("threshold"), timeout: $("timeout"),
     proxyMode: $("proxy-mode"), proxySummary: $("proxy-summary"),
+    contextBudget: $("context-budget-note"),
     saveDefaults: $("save-defaults"), defaultsStatus: $("defaults-status"),
     collection: $("collection-selector"), collectionDescription: $("collection-description"), collectionProfile: $("collection-profile"),
     run: $("run-button"), runLabel: $("run-label"), stop: $("stop-button"), single: $("run-single"),
@@ -30,6 +31,7 @@
     results: new Map(), metrics: null, scoringError: null,
     collections: [], collection: null, requestedCollectionId: null, loading: false,
     loadVersion: 0, loadController: null, defaultsApplied: false, dirtyConfig: new Set(),
+    contextLimitTokens: 262144,
   };
   const languageNames = { java: "Java", python: "Python", c: "C", javascript: "JavaScript", cpp: "C++", go: "Go" };
   const cweNames = {
@@ -152,6 +154,11 @@
   function renderDetail() {
     const item = state.caseMap.get(state.selectedId);
     const result = item ? state.results.get(item.id) : null;
+    const budget = item?.context_budget;
+    const limit = budget?.limit_tokens ?? state.contextLimitTokens;
+    ui.contextBudget.textContent = `上下文预算 256K（${limit.toLocaleString("zh-CN")} token）。` + (budget
+      ? `当前选中请求的保守估算上界：${budget.estimated_tokens_upper_bound.toLocaleString("zh-CN")}（UTF-8 字节 + ${budget.schema_allowance_tokens.toLocaleString("zh-CN")} 余量，非精确 token 数）。${budget.within_budget ? "在预算内。" : "超出预算，发送时将拒绝。"}输入不会截断。`
+      : "选择用例后显示保守估算；超出预算将拒绝发送，不截断输入。");
     ui.detailId.textContent = item?.id || "CASE PREVIEW";
     ui.detailTitle.textContent = item?.title || "暂无选中的用例";
     ui.detailTags.replaceChildren();
@@ -358,7 +365,7 @@
     if (!config) return;
     state.running = true;
     state.stopRequested = false;
-    state.batch = { ids: Object.freeze([...ids]), collection_id: state.collection.id, collection: Object.freeze({ ...state.collection }), config, started_at: new Date().toISOString(), finished_at: null };
+    state.batch = { ids: Object.freeze([...ids]), collection_id: state.collection.id, collection: Object.freeze({ ...state.collection }), config, context_limit_tokens: state.contextLimitTokens, started_at: new Date().toISOString(), finished_at: null };
     state.results.clear();
     state.metrics = null;
     state.scoringError = null;
@@ -414,7 +421,7 @@
 
   function exportableResult(result) {
     const row = {};
-    for (const key of ["id", "collection_id", "status", "verdict", "score", "latency_ms", "http_status", "response_model", "error", "raw_response"]) {
+    for (const key of ["id", "collection_id", "status", "verdict", "score", "latency_ms", "http_status", "response_model", "context_budget", "error", "raw_response"]) {
       if (result[key] !== undefined) row[key] = result[key];
     }
     return redactSecrets(row);
@@ -478,6 +485,7 @@
       state.caseMap = caseMap;
       ui.collection.replaceChildren(...state.collections.map((item) => new Option(item.name, item.id)));
       ui.collection.value = state.collection.id;
+      if (Number.isSafeInteger(data.defaults?.context_limit_tokens) && data.defaults.context_limit_tokens > 0) state.contextLimitTokens = data.defaults.context_limit_tokens;
       applyInitialDefaults(data.defaults || {});
       const languages = [...new Set(state.cases.map((item) => item.language))];
       const categories = [...new Set(state.cases.map((item) => item.focus_cwe))].sort((a, b) => a.localeCompare(b, "en", { numeric: true }));
@@ -573,7 +581,7 @@
   });
   ui.metrics.addEventListener("click", () => {
     if (state.running || state.loading || !state.metrics || !state.batch) return;
-    const report = { ...state.metrics, run: { collection_id: state.batch.collection_id, collection_name: state.batch.collection.name, request_profile: state.batch.collection.request_profile, case_ids: state.batch.ids, model: state.batch.config.model, endpoint: state.batch.config.endpoint, threshold: state.batch.config.threshold, timeout: state.batch.config.timeout, proxy_mode: state.batch.config.proxy_mode, started_at: state.batch.started_at, finished_at: state.batch.finished_at } };
+    const report = { ...state.metrics, run: { collection_id: state.batch.collection_id, collection_name: state.batch.collection.name, request_profile: state.batch.collection.request_profile, case_ids: state.batch.ids, model: state.batch.config.model, endpoint: state.batch.config.endpoint, threshold: state.batch.config.threshold, timeout: state.batch.config.timeout, proxy_mode: state.batch.config.proxy_mode, context_limit_tokens: state.batch.context_limit_tokens, started_at: state.batch.started_at, finished_at: state.batch.finished_at } };
     download(`decision-metrics-${state.batch.collection_id}.json`, JSON.stringify(redactSecrets(report), null, 2) + "\n", "application/json;charset=utf-8");
   });
   restoreDefaults();

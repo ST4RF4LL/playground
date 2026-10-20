@@ -20,6 +20,7 @@ HERE = Path(__file__).resolve().parent
 DATASET_ROOT = HERE.parent / "code_vulnerability"
 sys.path.insert(0, str(DATASET_ROOT / "scripts"))
 from decision_protocol import DEFAULT_MODEL, build_request, parse_noul
+from context_budget import CONTEXT_LIMIT_TOKENS, request_budget
 from score import evaluate, indexed, read_jsonl
 
 DEFAULTS = {
@@ -28,6 +29,7 @@ DEFAULTS = {
     "threshold": 0.5,
     "timeout": 60,
     "proxy_mode": "direct",
+    "context_limit_tokens": CONTEXT_LIMIT_TOKENS,
 }
 MAX_REQUEST = 2 * 1024 * 1024
 MAX_RESPONSE = 2 * 1024 * 1024
@@ -111,15 +113,23 @@ def call_model(case, config, profile="baseline"):
     started = time.perf_counter()
     proxy_mode = config.get("proxy_mode", DEFAULTS["proxy_mode"])
     body = build_request(case, config["model"], profile=profile)
-    headers = {"Content-Type": "application/json", "Accept": "application/json"}
-    if config["api_key"]:
-        headers["Authorization"] = "Bearer " + config["api_key"]
-    req = urllib.request.Request(config["endpoint"],
-                                 data=json.dumps(body, ensure_ascii=False, allow_nan=False).encode("utf-8"),
-                                 headers=headers, method="POST")
+    budget = request_budget(body)
     result = {"id": case["id"], "status": "error", "http_status": None,
-              "response_model": None, "raw_response": None, "proxy_mode": proxy_mode}
+              "response_model": None, "raw_response": None, "proxy_mode": proxy_mode,
+              "context_budget": budget}
     try:
+        if not budget["within_budget"]:
+            raise ValueError(
+                f"上下文保守估算上界 {budget['estimated_tokens_upper_bound']:,} 超过 "
+                f"256K（{budget['limit_tokens']:,} token）预算；未发送，未截断输入。"
+                "估算按 state/questions JSON 的 UTF-8 字节加 schema 余量计算，并非精确 token 数。"
+            )
+        headers = {"Content-Type": "application/json", "Accept": "application/json"}
+        if config["api_key"]:
+            headers["Authorization"] = "Bearer " + config["api_key"]
+        req = urllib.request.Request(config["endpoint"],
+                                     data=json.dumps(body, ensure_ascii=False, allow_nan=False).encode("utf-8"),
+                                     headers=headers, method="POST")
         # An explicit empty handler disables environment AND OS proxy discovery.
         proxy_handler = urllib.request.ProxyHandler({}) if proxy_mode == "direct" else urllib.request.ProxyHandler()
         opener = urllib.request.build_opener(proxy_handler, NoRedirect())
@@ -293,10 +303,11 @@ class BenchHandler(BaseHTTPRequestHandler):
             cases = []
             for key, row in collection["cases"].items():
                 answer = collection["gold"][key]
+                body = build_request(row, DEFAULT_MODEL, profile=collection["profile"])
                 cases.append({"id": key, "title": answer["title"], "language": row["language"],
                               "focus_cwe": answer["focus_cwe"], "suite": answer["suite"],
                               "expected": answer["verdict"], "context": row["context"], "code": row["code"],
-                              "body": build_request(row, DEFAULT_MODEL, profile=collection["profile"])})
+                              "body": body, "context_budget": request_budget(body)})
             self.reply(200, {"cases": cases, "manifest": collection["manifest"], "defaults": DEFAULTS,
                              "collection": collection["metadata"], "collections": self.server.collection_list(),
                              "default_collection_id": DEFAULT_COLLECTION_ID})
