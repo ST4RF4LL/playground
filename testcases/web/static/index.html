@@ -27,13 +27,14 @@
     </section>
 
     <section class="panel config-panel" aria-labelledby="config-heading">
-      <div class="section-heading"><h2 id="config-heading"><span class="section-number">01</span> 连接配置</h2><span class="hint">通过本地服务发送请求</span></div>
+      <div class="section-heading"><h2 id="config-heading"><span class="section-number">01</span> 连接配置</h2><button class="button quiet" id="save-defaults" type="button">保存为默认</button></div>
       <form id="config-form" autocomplete="off">
         <div class="config-grid">
           <label class="field endpoint-field"><span>Decision-model API <span class="required">*</span></span><input id="endpoint" name="endpoint" type="url" value="https://api.typesafe.ai/v1/systemone" placeholder="https://api.typesafe.ai/v1/systemone/" spellcheck="false" required><small>填写完整接口 URL，支持末尾斜线</small></label>
           <label class="field"><span>模型名称 <span class="required">*</span></span><input id="model" name="model" type="text" value="jev-latest" placeholder="jev-latest" spellcheck="false" required><small>将用于每条请求的 model 字段</small></label>
           <label class="field"><span>API key <span class="optional">可选</span></span><input id="api-key" name="api-key" type="password" placeholder="无需鉴权可留空" autocomplete="off" spellcheck="false"><small>仅本次页面使用，不写入导出文件</small></label>
         </div>
+        <p class="hint defaults-status" id="defaults-status" role="status">API 地址和模型名称可保存到当前浏览器；API key 不保存。</p>
         <details class="advanced">
           <summary>高级设置 <span class="summary-hint"><span id="proxy-summary">默认直连（不使用代理）</span> · 阈值与超时</span></summary>
           <div class="advanced-content">

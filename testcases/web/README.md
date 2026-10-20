@@ -20,6 +20,8 @@ Windows 下可在仓库根目录运行 `python testcases/web/server.py`。数据
 4. 点击案例查看实际请求 body，再单条试跑或按当前筛选批量运行。高级设置还可调整阈值（默认 0.5）及连接/读取超时（默认 60 秒）。
 5. 下载请求 JSONL，或导出本批结果和指标。结果 JSONL 可交给已有 `code_vulnerability/scripts/score.py` 评分。
 
+修改 API 地址和模型名称后，点击连接配置右上角的“保存为默认”。当前浏览器会记住这两项，下次打开或刷新时自动恢复；保存按测试端的访问地址和端口区分。API Key 仍只保留在本次页面内存中。
+
 测试集合从 `../code_vulnerability/collections/<集合 ID>/` 自动加载，每个目录保存独立的 `inputs/`、`gold/` 和 `manifest.json`。界面展示标准答案用于对照，但实际发往模型的 body 仅含 `state/model/questions`。`state` 只包含语言、判定范围、目标 CWE、上下文和代码。集合 ID、样本 ID、标题、标签、答案解释及来源不会发送给模型。
 
 请求示意（真实请求中的 state 包含完整上下文和代码）：

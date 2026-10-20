@@ -2,10 +2,12 @@
 
 (() => {
   const $ = (id) => document.getElementById(id);
+  const DEFAULTS_KEY = "decision-lab.connection-defaults";
   const ui = {
     summary: $("dataset-summary"), form: $("config-form"), endpoint: $("endpoint"),
     model: $("model"), apiKey: $("api-key"), threshold: $("threshold"), timeout: $("timeout"),
     proxyMode: $("proxy-mode"), proxySummary: $("proxy-summary"),
+    saveDefaults: $("save-defaults"), defaultsStatus: $("defaults-status"),
     collection: $("collection-selector"), collectionDescription: $("collection-description"), collectionProfile: $("collection-profile"),
     run: $("run-button"), runLabel: $("run-label"), stop: $("stop-button"), single: $("run-single"),
     status: $("run-status"), statusText: $("status-text"), retry: $("retry-button"),
@@ -231,6 +233,7 @@
   }
 
   function renderControls() {
+    ui.saveDefaults.disabled = state.running;
     for (const input of ui.form.querySelectorAll("input, select")) input.disabled = state.running;
     ui.proxySummary.textContent = ui.proxyMode.value === "system" ? "使用环境 / 系统代理" : "默认直连（不使用代理）";
     ui.collection.disabled = state.running || !state.collections.length;
@@ -275,13 +278,10 @@
     render();
   }
 
-  function readConfig() {
-    if (!ui.form.reportValidity()) return null;
+  function readConnection() {
+    if (!ui.endpoint.reportValidity() || !ui.model.reportValidity()) return null;
     const endpoint = ui.endpoint.value.trim();
     const model = ui.model.value.trim();
-    const threshold = Number(ui.threshold.value);
-    const timeout = Number(ui.timeout.value);
-    const proxy_mode = ui.proxyMode.value;
     let url;
     try { url = new URL(endpoint); } catch { setStatus("请填写完整的 API URL。", "error"); ui.endpoint.focus(); return null; }
     if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) {
@@ -290,6 +290,17 @@
       return null;
     }
     if (!model) { setStatus("请填写模型名称。", "error"); ui.model.focus(); return null; }
+    return { endpoint, model };
+  }
+
+  function readConfig() {
+    if (!ui.form.reportValidity()) return null;
+    const connection = readConnection();
+    if (!connection) return null;
+    const { endpoint, model } = connection;
+    const threshold = Number(ui.threshold.value);
+    const timeout = Number(ui.timeout.value);
+    const proxy_mode = ui.proxyMode.value;
     if (!Number.isFinite(threshold) || threshold < 0 || threshold > 1 || !Number.isInteger(timeout) || timeout < 1 || timeout > 300) {
       setStatus("判定阈值应在 0–1 之间，超时应为 1–300 秒的整数。", "error");
       return null;
@@ -300,6 +311,20 @@
       return null;
     }
     return Object.freeze({ endpoint, api_key: ui.apiKey.value.trim(), model, threshold, timeout, proxy_mode });
+  }
+
+  function restoreDefaults() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(DEFAULTS_KEY));
+      if (typeof saved?.endpoint !== "string" || !saved.endpoint.trim() || typeof saved?.model !== "string" || !saved.model.trim()) return;
+      ui.endpoint.value = saved.endpoint.trim();
+      ui.model.value = saved.model.trim();
+      // Saved connection values take priority over the initial server defaults.
+      state.dirtyConfig.add(ui.endpoint.id).add(ui.model.id);
+      ui.defaultsStatus.textContent = "已载入当前浏览器保存的 API 地址和模型名称。";
+    } catch {
+      ui.defaultsStatus.textContent = "无法读取浏览器默认设置，可重新填写并保存。";
+    }
   }
 
   async function post(path, payload) {
@@ -482,6 +507,17 @@
   }
 
   ui.form.addEventListener("submit", (event) => { event.preventDefault(); startBatch(state.filtered.map((item) => item.id)); });
+  ui.saveDefaults.addEventListener("click", () => {
+    if (state.running) return;
+    const connection = readConnection();
+    if (!connection) return;
+    try {
+      localStorage.setItem(DEFAULTS_KEY, JSON.stringify(connection));
+      ui.defaultsStatus.textContent = "已保存 API 地址和模型名称，下次打开时自动使用。";
+    } catch {
+      ui.defaultsStatus.textContent = "保存失败，请检查浏览器是否允许本地存储。";
+    }
+  });
   ui.run.addEventListener("click", () => startBatch(state.filtered.map((item) => item.id)));
   ui.single.addEventListener("click", () => { if (state.selectedId) startBatch([state.selectedId]); });
   ui.stop.addEventListener("click", () => {
@@ -496,7 +532,10 @@
   ui.clear.addEventListener("click", () => { ui.search.value = ""; ui.language.value = ""; ui.cwe.value = ""; applyFilters(); });
   ui.model.addEventListener("input", renderDetail);
   ui.proxyMode.addEventListener("change", renderControls);
-  for (const eventName of ["input", "change"]) ui.form.addEventListener(eventName, (event) => state.dirtyConfig.add(event.target.id));
+  for (const eventName of ["input", "change"]) ui.form.addEventListener(eventName, (event) => {
+    state.dirtyConfig.add(event.target.id);
+    if ([ui.endpoint, ui.model].includes(event.target)) ui.defaultsStatus.textContent = "API 或模型名称已修改，点击“保存为默认”可保留。";
+  });
   ui.collection.addEventListener("change", () => loadDataset(ui.collection.value));
   ui.retry.addEventListener("click", () => loadDataset());
   for (const tab of ui.tabs) {
@@ -537,5 +576,6 @@
     const report = { ...state.metrics, run: { collection_id: state.batch.collection_id, collection_name: state.batch.collection.name, request_profile: state.batch.collection.request_profile, case_ids: state.batch.ids, model: state.batch.config.model, endpoint: state.batch.config.endpoint, threshold: state.batch.config.threshold, timeout: state.batch.config.timeout, proxy_mode: state.batch.config.proxy_mode, started_at: state.batch.started_at, finished_at: state.batch.finished_at } };
     download(`decision-metrics-${state.batch.collection_id}.json`, JSON.stringify(redactSecrets(report), null, 2) + "\n", "application/json;charset=utf-8");
   });
+  restoreDefaults();
   loadDataset();
 })();
