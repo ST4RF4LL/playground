@@ -3,9 +3,10 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const DEFAULTS_KEY = "decision-lab.connection-defaults";
+  const PENDING_HISTORY_KEY = "decision-lab.pending-history-v1";
   const ui = {
     summary: $("dataset-summary"), form: $("config-form"), endpoint: $("endpoint"),
-    model: $("model"), apiKey: $("api-key"), threshold: $("threshold"), timeout: $("timeout"),
+    model: $("model"), modelRevision: $("model-revision"), apiKey: $("api-key"), threshold: $("threshold"), timeout: $("timeout"),
     proxyMode: $("proxy-mode"), proxySummary: $("proxy-summary"),
     contextBudget: $("context-budget-note"),
     saveDefaults: $("save-defaults"), defaultsStatus: $("defaults-status"),
@@ -26,6 +27,10 @@
     fill: $("progress-fill"), progressNote: $("progress-note"), accuracy: $("accuracy-value"),
     accuracyNote: $("accuracy-note"), fp: $("fp-value"), fn: $("fn-value"),
     errors: $("error-value"), errorNote: $("error-note"),
+    collectionChecklist: $("collection-checklist"), selectCollections: $("select-all-collections"),
+    clearCollections: $("clear-collections"), runCollections: $("run-collections"), batchProgress: $("batch-progress"),
+    historyList: $("history-list"), historyCount: $("history-count"), historyStatus: $("history-status"),
+    retryHistory: $("retry-history"), refreshHistory: $("refresh-history"), downloadHistory: $("download-history"),
   };
   const state = {
     cases: [], caseMap: new Map(), filtered: [], selectedId: null, tab: "request",
@@ -34,6 +39,9 @@
     collections: [], collection: null, requestedCollectionId: null, loading: false,
     loadVersion: 0, loadController: null, defaultsApplied: false, dirtyConfig: new Set(),
     contextLimitTokens: 262144,
+    selectedCollections: new Set(), queue: null,
+    history: null, pendingHistory: new Map(), historyErrors: new Map(), historyError: null,
+    historyStorageError: null, historyBusy: false, historyVersion: 0,
   };
   const languageNames = { java: "Java", python: "Python", c: "C", javascript: "JavaScript", cpp: "C++", go: "Go" };
   const cweNames = {
@@ -83,7 +91,7 @@
   }
 
   function currentModel() {
-    return state.running ? state.batch.config.model : ui.model.value.trim() || "jev-latest";
+    return state.running ? (state.batch?.config.model || state.queue?.config.model || ui.model.value.trim()) : ui.model.value.trim() || "jev-latest";
   }
 
   function requestBody(item, model = currentModel()) {
@@ -262,7 +270,7 @@
     if (state.requestedCollectionId) ui.collection.value = state.requestedCollectionId;
     if (state.collection) {
       ui.collectionDescription.textContent = state.collection.description || state.collection.name;
-      ui.collectionProfile.textContent = `${state.collection.count ?? state.cases.length} 条用例 · 切换集合会清空上批结果，保留连接配置。`;
+      ui.collectionProfile.textContent = `${state.collection.count ?? state.cases.length} 条用例 · 切换浏览集合会清空临时详情，运行汇总独立保存。`;
       ui.direction.textContent = `评估方向：${state.collection.evaluation_direction}`;
     } else {
       const pending = state.collections.find((item) => item.id === state.requestedCollectionId);
@@ -279,7 +287,7 @@
     ui.errorTypes.textContent = isAgentTask() ? "FP：安全行为误报 · FN：不安全行为漏报" : "FP：无目标漏洞误报 · FN：目标漏洞漏报";
     for (const filter of [ui.search, ui.language, ui.cwe]) filter.disabled = state.loading || !state.cases.length;
     ui.run.disabled = state.running || state.loading || !state.collection || !state.filtered.length;
-    ui.runLabel.textContent = state.loading ? "正在加载集合…" : state.running ? `运行中 ${state.results.size} / ${state.batch.ids.length}` : `运行当前用例 (${state.filtered.length})`;
+    ui.runLabel.textContent = state.loading ? "正在加载集合…" : state.running ? `运行中 ${state.results.size} / ${state.batch?.ids.length || 0}` : `运行当前用例 (${state.filtered.length})`;
     ui.run.title = "开始新批次，清空上批结果";
     ui.single.disabled = state.running || state.loading || !state.collection || !state.selectedId;
     ui.single.title = "以此用例开始新批次，清空上批结果";
@@ -289,6 +297,7 @@
     ui.results.disabled = state.running || state.loading || !state.results.size;
     ui.metrics.disabled = state.running || state.loading || !state.metrics;
     ui.clear.hidden = !(ui.search.value || ui.language.value || ui.cwe.value);
+    renderCollectionControls();
   }
 
   function render() {
@@ -296,6 +305,222 @@
     renderDetail();
     renderMetrics();
     renderControls();
+  }
+
+  function renderCollectionChoices() {
+    const fragment = document.createDocumentFragment();
+    for (const item of state.collections) {
+      const label = document.createElement("label");
+      label.className = "collection-choice";
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.value = item.id;
+      checkbox.checked = state.selectedCollections.has(item.id);
+      const text = document.createElement("span");
+      const name = document.createElement("strong");
+      name.textContent = `${item.name} · ${item.count} 条`;
+      const direction = document.createElement("small");
+      direction.textContent = item.evaluation_direction || item.description || "独立评估";
+      text.append(name, direction);
+      label.append(checkbox, text);
+      checkbox.addEventListener("change", () => {
+        if (checkbox.checked) state.selectedCollections.add(item.id);
+        else state.selectedCollections.delete(item.id);
+        renderCollectionControls();
+      });
+      fragment.append(label);
+    }
+    ui.collectionChecklist.replaceChildren(fragment);
+    renderCollectionControls();
+  }
+
+  function renderCollectionControls() {
+    const selected = state.collections.filter((item) => state.selectedCollections.has(item.id));
+    const count = selected.reduce((sum, item) => sum + item.count, 0);
+    for (const checkbox of ui.collectionChecklist.querySelectorAll("input")) {
+      checkbox.disabled = state.running;
+      checkbox.checked = state.selectedCollections.has(checkbox.value);
+    }
+    ui.selectCollections.disabled = state.running || !state.collections.length;
+    ui.clearCollections.disabled = state.running || !selected.length;
+    ui.runCollections.disabled = state.running || state.loading || !selected.length;
+    ui.runCollections.textContent = `运行所选集合${selected.length ? ` (${selected.length})` : ""}`;
+    const queue = state.queue;
+    if (queue && state.running) {
+      const name = state.collections.find((item) => item.id === queue.targets[queue.index]?.collection_id)?.name || "集合";
+      ui.batchProgress.textContent = `${state.stopRequested ? "正在停止" : "正在执行"} · 集合 ${queue.index + 1} / ${queue.targets.length}：${name} · 已执行 ${queue.completed + state.results.size} / ${queue.total} 条。下方指标仅对应当前集合。`;
+    } else if (queue?.finished) {
+      ui.batchProgress.textContent = `${queue.stopped ? "批量已停止" : queue.failed ? "批量已中断" : "批量已完成"} · ${queue.finishedCollections} / ${queue.targets.length} 个集合有运行记录，已执行 ${queue.completed} / ${queue.total} 条。已选 ${selected.length} 个集合，可再次运行。`;
+    } else {
+      ui.batchProgress.textContent = selected.length ? `已选 ${selected.length} 个集合，共 ${count} 条；每个集合独立保存汇总。` : "选择一个或多个测试集合。";
+    }
+  }
+
+  function historyRows() {
+    const rows = [];
+    for (const [model, collections] of Object.entries(state.history?.models || {})) {
+      for (const [collection_id, records] of Object.entries(collections)) {
+        for (const record of records) rows.push({ ...record, model, collection_id });
+      }
+    }
+    return rows.sort((a, b) => String(b.started_at).localeCompare(String(a.started_at)));
+  }
+
+  function renderHistory() {
+    const rows = historyRows();
+    ui.historyCount.textContent = rows.length;
+    const pending = [...state.pendingHistory.values()].filter((entry) => !entry.incomplete);
+    ui.retryHistory.hidden = !pending.length;
+    ui.retryHistory.disabled = state.historyBusy;
+    ui.retryHistory.textContent = `重试保存 (${pending.length})`;
+    ui.refreshHistory.disabled = state.historyBusy;
+    ui.downloadHistory.disabled = !state.history || state.historyBusy;
+    const messages = [];
+    if (state.historyError) messages.push(`历史读取失败：${state.historyError}`);
+    if (pending.length) messages.push(`${pending.length} 次运行尚未保存，切换集合后仍可重试。${[...state.historyErrors.values()][0] || ""}`);
+    if (state.historyStorageError) messages.push(state.historyStorageError);
+    ui.historyStatus.textContent = messages.join(" ") || (state.historyBusy ? "正在同步运行汇总…" : rows.length ? `已保存 ${rows.length} 次运行。${rows.length > 50 ? "列表显示最近 50 次，JSON 包含全部历史。" : ""}` : "尚无运行记录。单条、筛选运行和多集合批量运行都会自动保存汇总。");
+    ui.historyStatus.classList.toggle("error", messages.length > 0);
+    const fragment = document.createDocumentFragment();
+    for (const record of rows.slice(0, 50)) {
+      const row = document.createElement("tr");
+      const counts = record.counts || {};
+      const metrics = record.metrics || {};
+      const date = new Date(record.started_at);
+      const collection = state.collections.find((item) => item.id === record.collection_id);
+      const cells = [
+        [Number.isNaN(date.valueOf()) ? record.started_at : date.toLocaleString("zh-CN"), { completed: "已完成", stopped: "已停止", interrupted: "已中断" }[record.status] || record.status],
+        [record.model, collection?.name || record.collection_id],
+        [`${record.scope === "full" ? "全集" : "部分用例"} · ${record.selected_count ?? counts.total} 条`, `已执行 ${(counts.total || 0) - (counts.missing || 0)} · 阈值 ${record.threshold}`],
+        [Number.isFinite(metrics.accuracy) ? `${(metrics.accuracy * 100).toFixed(1)}%` : "—", `${counts.correct ?? 0} 条正确`],
+        [`${counts.tp ?? 0} / ${counts.tn ?? 0}`],
+        [`${counts.fp ?? 0} / ${counts.fn ?? 0}`],
+        [`${counts.error ?? 0} / ${counts.missing ?? 0}`],
+      ];
+      row.title = `运行 ${record.run_id} · 集合版本 ${(record.collection_fingerprint || "").slice(0, 12)}${record.model_revision ? ` · ${record.model_revision}` : ""}`;
+      for (const [main, secondary] of cells) {
+        const cell = document.createElement("td");
+        const primary = document.createElement("span");
+        primary.textContent = main;
+        cell.append(primary);
+        if (secondary) {
+          const small = document.createElement("small");
+          small.textContent = secondary;
+          cell.append(small);
+        }
+        row.append(cell);
+      }
+      fragment.append(row);
+    }
+    ui.historyList.replaceChildren(fragment);
+  }
+
+  function persistPendingHistory() {
+    try {
+      // Keep checkpoints local to this tab: opening another model comparison tab
+      // must not finalize a run that is still active here.
+      if (state.pendingHistory.size) sessionStorage.setItem(PENDING_HISTORY_KEY, JSON.stringify([...state.pendingHistory.values()]));
+      else sessionStorage.removeItem(PENDING_HISTORY_KEY);
+      state.historyStorageError = null;
+    } catch {
+      state.historyStorageError = "浏览器无法缓存待保存汇总；请保持页面打开并重试保存。";
+    }
+  }
+
+  function restorePendingHistory() {
+    try {
+      const pending = JSON.parse(sessionStorage.getItem(PENDING_HISTORY_KEY) || "[]");
+      if (!Array.isArray(pending)) throw new Error("invalid pending history");
+      for (const entry of pending) {
+        if (!entry?.payload?.run_id || !Array.isArray(entry.payload.case_ids) || !Array.isArray(entry.payload.predictions)) continue;
+        if (entry.incomplete) {
+          entry.payload.status = "interrupted";
+          entry.payload.finished_at = new Date().toISOString();
+          entry.incomplete = false;
+        }
+        state.pendingHistory.set(entry.payload.run_id, entry);
+      }
+      persistPendingHistory();
+    } catch {
+      state.historyStorageError = "未能读取浏览器中待保存的汇总，请保留浏览器数据以便排查。";
+    }
+  }
+
+  async function loadHistory() {
+    const version = ++state.historyVersion;
+    try {
+      const response = await fetch("/api/history", { cache: "no-store", credentials: "same-origin" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const data = await response.json();
+      if (data.schema_version !== 1 || !data.models || typeof data.models !== "object" || Array.isArray(data.models)) throw new Error("历史格式无效");
+      if (version !== state.historyVersion) return false;
+      state.history = data;
+      state.historyError = null;
+      renderHistory();
+      return true;
+    } catch (error) {
+      if (version === state.historyVersion) state.historyError = redactSecrets(error.message);
+    }
+    renderHistory();
+    return false;
+  }
+
+  function checkpointBatch(incomplete = true) {
+    const batch = state.batch;
+    const payload = {
+      run_id: batch.run_id, batch_id: batch.batch_id, collection_id: batch.collection_id,
+      collection_fingerprint: batch.collection.fingerprint,
+      case_ids: [...batch.ids],
+      predictions: [...state.results.values()].map((result) => result.status === "ok"
+        ? { id: result.id, collection_id: batch.collection_id, status: "ok", score: result.score }
+        : { id: result.id, collection_id: batch.collection_id, status: "error" }),
+      config: { ...batch.history_config }, started_at: batch.started_at,
+      finished_at: batch.finished_at || new Date().toISOString(), status: batch.status || "interrupted",
+    };
+    state.pendingHistory.set(batch.run_id, { payload, incomplete });
+    persistPendingHistory();
+    renderHistory();
+  }
+
+  async function saveHistoryEntry(entry) {
+    try {
+      const data = await post("/api/history", entry.payload);
+      if (data.record?.run_id !== entry.payload.run_id) throw new Error("保存服务返回了不匹配的运行记录。");
+      state.pendingHistory.delete(entry.payload.run_id);
+      state.historyErrors.delete(entry.payload.run_id);
+      persistPendingHistory();
+      // Append the confirmed server summary. Pending inputs never enter exports.
+      state.historyVersion += 1;
+      if (!state.history) state.history = { schema_version: 1, models: {} };
+      const models = state.history.models;
+      const model = entry.payload.config.model;
+      const collection = entry.payload.collection_id;
+      if (!Object.hasOwn(models, model)) Object.defineProperty(models, model, { value: {}, enumerable: true, configurable: true, writable: true });
+      if (!Object.hasOwn(models[model], collection)) Object.defineProperty(models[model], collection, { value: [], enumerable: true, configurable: true, writable: true });
+      const records = models[model][collection];
+      if (!records.some((record) => record.run_id === data.record.run_id)) records.push(data.record);
+      return true;
+    } catch (error) {
+      state.historyErrors.set(entry.payload.run_id, redactSecrets(error.message));
+      return false;
+    } finally {
+      renderHistory();
+    }
+  }
+
+  async function retryPendingHistory() {
+    if (state.historyBusy) return;
+    state.historyBusy = true;
+    renderHistory();
+    try {
+      for (const entry of [...state.pendingHistory.values()]) {
+        if (!entry.incomplete) await saveHistoryEntry(entry);
+      }
+      await loadHistory();
+    } finally {
+      state.historyBusy = false;
+      renderHistory();
+    }
   }
 
   function applyFilters() {
@@ -341,7 +566,7 @@
       ui.proxyMode.focus();
       return null;
     }
-    return Object.freeze({ endpoint, api_key: ui.apiKey.value.trim(), model, threshold, timeout, proxy_mode });
+    return Object.freeze({ endpoint, api_key: ui.apiKey.value.trim(), model, threshold, timeout, proxy_mode, model_revision: ui.modelRevision.value.trim() });
   }
 
   function restoreDefaults() {
@@ -385,14 +610,76 @@
 
   async function startBatch(ids) {
     if (state.running || state.loading || !state.collection || !ids.length) return;
+    await startQueue([{ collection_id: state.collection.id, ids: [...ids] }]);
+  }
+
+  async function startQueue(targets) {
+    if (state.running || state.loading || !targets.length) return;
     const config = readConfig();
     if (!config) return;
     state.running = true;
     state.stopRequested = false;
-    state.batch = { ids: Object.freeze([...ids]), collection_id: state.collection.id, collection: Object.freeze({ ...state.collection }), config, context_limit_tokens: state.contextLimitTokens, started_at: new Date().toISOString(), finished_at: null };
+    const queue = {
+      targets, config, batch_id: crypto.randomUUID(), index: 0, completed: 0, finishedCollections: 0, errors: 0,
+      total: targets.reduce((sum, target) => sum + (target.ids?.length ?? state.collections.find((item) => item.id === target.collection_id)?.count ?? 0), 0),
+      finished: false, stopped: false, failed: false,
+    };
+    state.queue = queue;
+    renderControls();
+    try {
+      const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(config.endpoint));
+      const historyConfig = Object.freeze({
+        endpoint_fingerprint: [...new Uint8Array(hash)].map((value) => value.toString(16).padStart(2, "0")).join(""),
+        model: config.model, model_revision: config.model_revision, threshold: config.threshold,
+        timeout: config.timeout, proxy_mode: config.proxy_mode,
+      });
+      for (let index = 0; index < targets.length; index += 1) {
+        if (state.stopRequested) break;
+        queue.index = index;
+        const target = targets[index];
+        // Multi-collection runs always reload the full collection; browsing filters
+        // never determine a queued collection's denominator.
+        if (!target.ids || state.collection?.id !== target.collection_id) {
+          const loaded = await loadDataset(target.collection_id, true);
+          if (!loaded) throw new Error("测试集合未能加载，已停止后续集合。已保存的汇总仍保留。");
+        }
+        if (state.stopRequested) break;
+        await runCollection(target.ids || state.cases.map((item) => item.id), config, historyConfig, queue.batch_id);
+        queue.completed += state.results.size;
+        queue.errors += localCounts().errors;
+        queue.finishedCollections += 1;
+      }
+    } catch (error) {
+      queue.failed = true;
+      queue.error = redactSecrets(error.message, config.api_key);
+    } finally {
+      state.running = false;
+      state.inFlight = null;
+      queue.finished = true;
+      queue.stopped = state.stopRequested;
+      queue.config = { model: config.model };
+      let message = queue.failed ? queue.error : `${queue.stopped ? "已停止" : "运行完成"} · ${queue.finishedCollections} / ${queue.targets.length} 个集合，已执行 ${queue.completed} / ${queue.total} 条，${queue.errors} 条请求或解析错误。`;
+      const unsaved = [...state.pendingHistory.values()].filter((entry) => !entry.incomplete).length;
+      if (unsaved) message += ` ${unsaved} 次汇总尚未保存，请在下方历史区重试。`;
+      else if (queue.finishedCollections) message += " 汇总已自动保存。";
+      if (state.scoringError) message += ` 当前集合详细指标暂不可用：${state.scoringError}`;
+      setStatus(message, queue.failed || queue.errors || unsaved ? "error" : "success");
+      render();
+      renderHistory();
+    }
+  }
+
+  async function runCollection(ids, config, historyConfig, batchId) {
+    state.batch = {
+      run_id: crypto.randomUUID(), batch_id: batchId, ids: Object.freeze([...ids]),
+      collection_id: state.collection.id, collection: Object.freeze({ ...state.collection }),
+      config, history_config: historyConfig, context_limit_tokens: state.contextLimitTokens,
+      started_at: new Date().toISOString(), finished_at: null,
+    };
     state.results.clear();
     state.metrics = null;
     state.scoringError = null;
+    checkpointBatch();
     render();
     try {
       for (const id of state.batch.ids) {
@@ -406,27 +693,25 @@
         try {
           result = await post("/api/run", { collection_id: state.batch.collection_id, case_id: id, config });
           if (result.id !== id || result.collection_id !== state.batch.collection_id || !["ok", "error"].includes(result.status)) throw new Error("本地服务返回了不匹配的集合或用例结果。");
-          if (result.status === "ok" && (![positiveLabel(), negativeLabel()].includes(result.verdict) || !Number.isFinite(result.score))) throw new Error("模型响应没有有效的判断或 noul 分值。");
+          if (result.status === "ok" && (![positiveLabel(), negativeLabel()].includes(result.verdict) || !Number.isFinite(result.score) || result.score < 0 || result.score > 1)) throw new Error("模型响应没有有效的判断或 noul 分值。");
         } catch (error) {
           result = { id, collection_id: state.batch.collection_id, status: "error", latency_ms: Math.round(performance.now() - started), error: error.message, raw_response: null };
         }
         state.results.set(id, redactSecrets(result, config.api_key));
         state.inFlight = null;
+        checkpointBatch();
         render();
-        await refreshScore();
       }
     } finally {
-      state.running = false;
       state.inFlight = null;
       state.batch.finished_at = new Date().toISOString();
-      const remaining = state.batch.ids.length - state.results.size;
-      const errors = localCounts().errors;
-      let message = remaining ? `已停止 · 已完成 ${state.results.size} / ${state.batch.ids.length} 条，${remaining} 条未执行。` : `本批完成 · ${state.results.size} 条用例，${errors} 条请求或解析错误。`;
-      if (state.scoringError) message += ` 指标服务暂不可用：${state.scoringError}`;
-      else message += " 可导出结果与详细指标。";
-      setStatus(message, state.scoringError || errors ? "error" : "success");
+      state.batch.status = state.results.size === state.batch.ids.length ? "completed" : state.stopRequested ? "stopped" : "interrupted";
+      checkpointBatch(false);
+      setStatus(`正在保存「${state.collection.name}」的运行汇总…`, "running");
+      await saveHistoryEntry(state.pendingHistory.get(state.batch.run_id));
+      await refreshScore();
       // Keep only non-secret batch metadata after the requests have finished.
-      state.batch.config = Object.freeze({ endpoint: config.endpoint, model: config.model, threshold: config.threshold, timeout: config.timeout, proxy_mode: config.proxy_mode });
+      state.batch.config = Object.freeze({ endpoint: config.endpoint, model: config.model, threshold: config.threshold, timeout: config.timeout, proxy_mode: config.proxy_mode, model_revision: config.model_revision });
       render();
     }
   }
@@ -462,8 +747,8 @@
     state.defaultsApplied = true;
   }
 
-  async function loadDataset(collectionId = state.requestedCollectionId) {
-    if (state.running) return;
+  async function loadDataset(collectionId = state.requestedCollectionId, fromQueue = false) {
+    if (state.running && !fromQueue) return false;
     const version = ++state.loadVersion;
     state.loadController?.abort();
     const controller = new AbortController();
@@ -479,7 +764,7 @@
     state.selectedId = null;
     state.batch = null;
     state.inFlight = null;
-    state.stopRequested = false;
+    if (!fromQueue) state.stopRequested = false;
     state.results.clear();
     state.metrics = null;
     state.scoringError = null;
@@ -504,6 +789,8 @@
       if (caseMap.size !== cases.length) throw new Error("测试集合包含重复的用例 ID。");
       state.collection = Object.freeze({ ...data.collection });
       state.collections = data.collections;
+      renderCollectionChoices();
+      renderHistory();
       state.requestedCollectionId = data.collection.id;
       state.cases = cases;
       state.caseMap = caseMap;
@@ -521,7 +808,8 @@
       state.loading = false;
       state.loadController = null;
       applyFilters();
-      setStatus(`「${state.collection.name}」已就绪。每次运行创建新批次，切换集合会清空结果并保留连接配置。`, "success");
+      setStatus(`「${state.collection.name}」已就绪。每次运行自动保存汇总，切换浏览集合只清空临时详情。`, "success");
+      return true;
     } catch (error) {
       if (version !== state.loadVersion || error.name === "AbortError") return;
       state.loading = false;
@@ -536,6 +824,7 @@
       if (!state.collections.length) ui.collection.replaceChildren(new Option("集合加载失败", ""));
       setStatus(`${error.message} 请重试或选择其他集合。`, "error");
       render();
+      return false;
     }
   }
 
@@ -552,6 +841,19 @@
     }
   });
   ui.run.addEventListener("click", () => startBatch(state.filtered.map((item) => item.id)));
+  ui.runCollections.addEventListener("click", () => startQueue(state.collections
+    .filter((item) => state.selectedCollections.has(item.id))
+    .map((item) => ({ collection_id: item.id, ids: null }))));
+  ui.selectCollections.addEventListener("click", () => {
+    if (state.running) return;
+    state.selectedCollections = new Set(state.collections.map((item) => item.id));
+    renderCollectionControls();
+  });
+  ui.clearCollections.addEventListener("click", () => {
+    if (state.running) return;
+    state.selectedCollections.clear();
+    renderCollectionControls();
+  });
   ui.single.addEventListener("click", () => { if (state.selectedId) startBatch([state.selectedId]); });
   ui.stop.addEventListener("click", () => {
     if (!state.running) return;
@@ -609,6 +911,32 @@
     const report = { ...state.metrics, run: { collection_id: state.batch.collection_id, collection_name: state.batch.collection.name, request_profile: state.batch.collection.request_profile, case_ids: state.batch.ids, model: state.batch.config.model, endpoint: state.batch.config.endpoint, threshold: state.batch.config.threshold, timeout: state.batch.config.timeout, proxy_mode: state.batch.config.proxy_mode, context_limit_tokens: state.batch.context_limit_tokens, started_at: state.batch.started_at, finished_at: state.batch.finished_at } };
     download(`decision-metrics-${state.batch.collection_id}.json`, JSON.stringify(redactSecrets(report), null, 2) + "\n", "application/json;charset=utf-8");
   });
+  ui.retryHistory.addEventListener("click", retryPendingHistory);
+  ui.refreshHistory.addEventListener("click", async () => {
+    if (state.historyBusy) return;
+    state.historyBusy = true;
+    renderHistory();
+    try { await loadHistory(); }
+    finally { state.historyBusy = false; renderHistory(); }
+  });
+  ui.downloadHistory.addEventListener("click", async () => {
+    if (state.historyBusy) return;
+    state.historyBusy = true;
+    renderHistory();
+    try {
+      if (await loadHistory()) download("decision-run-history.json", JSON.stringify(state.history, null, 2) + "\n", "application/json;charset=utf-8");
+    } finally {
+      state.historyBusy = false;
+      renderHistory();
+    }
+  });
+  window.addEventListener("beforeunload", (event) => {
+    if (!state.running && !state.pendingHistory.size) return;
+    event.preventDefault();
+    event.returnValue = "";
+  });
   restoreDefaults();
+  restorePendingHistory();
   loadDataset();
+  retryPendingHistory();
 })();

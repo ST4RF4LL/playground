@@ -6,9 +6,13 @@ code_vulnerability/collections/cve_focused_100/** -text
 code_vulnerability/sources/juliet_java/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
 code_vulnerability/sources/vul4j/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
 code_vulnerability/sources/primevul/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
-code_vulnerability/collections/juliet_java_200/** -text
+code_vulnerability/collections/juliet_java_1000/** -text
 code_vulnerability/collections/vul4j_60/** -text
 code_vulnerability/collections/primevul_200/** -text
+code_vulnerability/sources/owasp_java_web/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
+code_vulnerability/sources/cweval/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
+code_vulnerability/collections/owasp_java_web_180/** -text
+code_vulnerability/collections/cweval_100/** -text
 agent_safety/sources/atbench/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
 agent_safety/collections/atbench_200/** -text
 code_vulnerability/sources/knowledge_workflow/cases/** whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab

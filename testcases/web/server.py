@@ -2,6 +2,7 @@
 """Local decision-model testbench. Python standard library; no external service on startup."""
 import argparse
 from collections import Counter
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import http.client
 import json
@@ -22,6 +23,7 @@ sys.path.insert(0, str(DATASET_ROOT / "scripts"))
 from decision_protocol import DEFAULT_MODEL, build_request, parse_noul, question_key, verdict_labels
 from context_budget import CONTEXT_LIMIT_TOKENS, request_budget
 from score import evaluate, indexed, read_jsonl
+from result_history import HistoryStore, HistoryStorageError, collection_fingerprint, make_record
 
 DEFAULTS = {
     "endpoint": "https://api.typesafe.ai/v1/systemone",
@@ -34,6 +36,7 @@ DEFAULTS = {
 MAX_REQUEST = 2 * 1024 * 1024
 MAX_RESPONSE = 2 * 1024 * 1024
 DEFAULT_COLLECTION_ID = "baseline"
+DEFAULT_HISTORY_PATH = HERE.parent / "results" / "history.json"
 
 
 def redact(value, secret):
@@ -103,6 +106,28 @@ def validate_config(config):
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
+
+
+def validate_history_config(value):
+    if not isinstance(value, dict):
+        raise ValueError("历史记录缺少运行配置。")
+    supplied_fingerprint = value.get("endpoint_fingerprint")
+    # A browser checkpoint retains only an endpoint hash, never URL query keys.
+    candidate = {**value, "api_key": ""}
+    if supplied_fingerprint is not None:
+        if not isinstance(supplied_fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", supplied_fingerprint):
+            raise ValueError("endpoint_fingerprint 必须为 SHA-256。")
+        candidate["endpoint"] = "http://history.invalid/v1/systemone"
+    config = validate_config(candidate)
+    revision = value.get("model_revision", "")
+    if revision is None:
+        revision = ""
+    if not isinstance(revision, str) or len(revision) > 256 or any(ord(ch) < 32 for ch in revision):
+        raise ValueError("模型版本备注须为最多 256 字符的单行文本。")
+    return {"model": config["model"], "threshold": config["threshold"],
+            "timeout": config["timeout"], "proxy_mode": config["proxy_mode"],
+            "model_revision": revision.strip() or None,
+            "endpoint_fingerprint": supplied_fingerprint or hashlib.sha256(config["endpoint"].encode("utf-8")).hexdigest()}
 
 
 def reject_json_constant(value):
@@ -180,7 +205,8 @@ class BenchServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address):
+    def __init__(self, address, history_path=None):
+        self.history = HistoryStore(history_path if history_path is not None else DEFAULT_HISTORY_PATH)
         self.collections = {}
         roots = list((DATASET_ROOT / "collections").iterdir())
         agent_collections = DATASET_ROOT.parent / "agent_safety" / "collections"
@@ -223,6 +249,7 @@ class BenchServer(ThreadingHTTPServer):
             if any(row.get("verdict") not in verdict_labels(profile) for row in gold.values()):
                 raise ValueError(f"测试集合 {root.name} 的标签与评估方向不一致。")
             metadata["count"] = len(cases)
+            metadata["fingerprint"] = collection_fingerprint(cases, gold, profile)
             self.collections[root.name] = {"metadata": metadata, "cases": cases,
                                            "gold": gold, "manifest": manifest, "profile": profile}
         if DEFAULT_COLLECTION_ID not in self.collections:
@@ -311,6 +338,12 @@ class BenchHandler(BaseHTTPRequestHandler):
             self.reply(200, {"collections": self.server.collection_list(),
                              "default_collection_id": DEFAULT_COLLECTION_ID})
             return
+        if path == "/api/history":
+            try:
+                self.reply(200, self.server.history.read())
+            except (HistoryStorageError, OSError):
+                self.reply(503, {"error": "无法读取历史记录，请检查记录文件格式和读写权限；原文件未被覆盖。"})
+            return
         if path == "/api/dataset":
             query = urllib.parse.parse_qs(url.query, keep_blank_values=True)
             ids = query.get("collection_id", [DEFAULT_COLLECTION_ID])
@@ -360,7 +393,7 @@ class BenchHandler(BaseHTTPRequestHandler):
         if not self.trusted_request(mutation=True):
             return
         path = urllib.parse.urlsplit(self.path).path
-        if path not in {"/api/run", "/api/score"}:
+        if path not in {"/api/run", "/api/score", "/api/history"}:
             self.close_connection = True
             self.reply(404, {"error": "接口不存在。"})
             return
@@ -368,6 +401,12 @@ class BenchHandler(BaseHTTPRequestHandler):
             data = self.read_object()
             collection_id = data.get("collection_id")
             collection = self.server.collection(collection_id)
+            if path == "/api/history":
+                config = validate_history_config(data.get("config"))
+                record = make_record(data, collection, config)
+                record, created = self.server.history.append(record)
+                self.reply(200, {"record": record, "created": created})
+                return
             if path == "/api/run":
                 key = data.get("case_id")
                 if not isinstance(key, str) or key not in collection["cases"]:
@@ -402,30 +441,35 @@ class BenchHandler(BaseHTTPRequestHandler):
             metrics["evaluation_direction"] = collection["metadata"]["evaluation_direction"]
             metrics["task_type"] = collection["metadata"]["task_type"]
             self.reply(200, metrics)
+        except (HistoryStorageError, OSError):
+            self.close_connection = True
+            self.reply(503, {"error": "无法保存历史记录，请检查记录文件格式和读写权限；可重试保存。"})
         except (ValueError, TypeError) as exc:
             self.close_connection = True
             self.reply(400, {"error": str(exc)})
 
 
-def create_server(host="127.0.0.1", port=8765):
+def create_server(host="127.0.0.1", port=8765, history_path=None):
     if host not in {"127.0.0.1", "localhost"}:
         raise ValueError("此测试端仅绑定本机地址。")
-    return BenchServer((host, port))
+    return BenchServer((host, port), history_path=history_path)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--history-file", type=Path, default=DEFAULT_HISTORY_PATH,
+                        help="JSON 汇总历史的保存路径（默认 testcases/results/history.json）")
     args = parser.parse_args()
     if not 0 <= args.port <= 65535:
         parser.error("端口须为 0–65535（0 表示自动分配）。")
     try:
-        server = create_server(port=args.port)
+        server = create_server(port=args.port, history_path=args.history_file)
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
     print(f"Decision Lab · http://127.0.0.1:{server.server_port}", flush=True)
     count = sum(len(entry["cases"]) for entry in server.collections.values())
-    print(f"Loaded {len(server.collections)} collections / {count} case entries. API keys and results stay in memory. Ctrl+C to stop.", flush=True)
+    print(f"Loaded {len(server.collections)} collections / {count} case entries. Summary history: {server.history.path}. Keys and raw responses are not saved. Ctrl+C to stop.", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

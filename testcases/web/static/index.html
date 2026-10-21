@@ -22,8 +22,15 @@
     </header>
 
     <section class="panel collection-panel" aria-label="选择测试集合">
-      <label class="field collection-field"><span>测试集合</span><select id="collection-selector" aria-describedby="collection-description" disabled><option value="">正在加载集合…</option></select></label>
-      <div class="collection-info"><strong id="evaluation-direction">评估方向：等待集合加载</strong><p id="collection-description">每套集合独立评估代码漏洞或 Agent 行为安全。</p><span class="collection-profile" id="collection-profile">切换集合会清空上批结果，保留连接配置。</span></div>
+      <label class="field collection-field"><span>当前浏览集合</span><select id="collection-selector" aria-describedby="collection-description" disabled><option value="">正在加载集合…</option></select></label>
+      <div class="collection-info"><strong id="evaluation-direction">评估方向：等待集合加载</strong><p id="collection-description">每套集合独立评估代码漏洞或 Agent 行为安全。</p><span class="collection-profile" id="collection-profile">切换浏览集合会清空临时详情，运行汇总独立保存。</span></div>
+    </section>
+
+    <section class="panel batch-panel" aria-labelledby="batch-heading">
+      <div class="section-heading"><h2 id="batch-heading">批量测试集合</h2><div class="batch-actions"><button class="text-button" id="select-all-collections" type="button">全选</button><button class="text-button" id="clear-collections" type="button">清空</button><button class="button primary" id="run-collections" type="button" disabled>运行所选集合</button></div></div>
+      <p class="hint batch-hint">按下列顺序运行所选集合的全部用例，不受下方搜索和筛选影响。各集合独立计分、分别保存一次汇总，使用同一份连接配置。</p>
+      <div class="collection-checklist" id="collection-checklist" role="group" aria-label="批量选择测试集合"></div>
+      <p class="batch-progress" id="batch-progress" aria-live="polite">选择一个或多个测试集合。</p>
     </section>
 
     <section class="panel config-panel" aria-labelledby="config-heading">
@@ -41,6 +48,7 @@
             <label class="field proxy-field"><span>代理模式</span><select id="proxy-mode" name="proxy-mode"><option value="direct">直连（不使用代理）</option><option value="system">使用环境 / 系统代理</option></select></label>
             <label class="field"><span id="threshold-label">有目标漏洞判定阈值</span><input id="threshold" name="threshold" type="number" min="0" max="1" step="any" value="0.5" required></label>
             <label class="field"><span>单次超时（秒）</span><input id="timeout" name="timeout" type="number" min="1" max="300" step="1" value="60" required></label>
+            <label class="field"><span>模型版本 / 备注 <span class="optional">可选</span></span><input id="model-revision" name="model-revision" type="text" maxlength="200" placeholder="如量化版本或部署日期"><small>仅写入运行汇总，用于区分同名模型</small></label>
             <p class="advanced-note">默认直连，不读取代理配置；需要代理时可手动选择使用环境 / 系统代理。<span id="question-note">分值 ≥ 阈值时判为当前集合的正类。请求按顺序执行。</span><br><span id="context-budget-note">上下文预算 256K（262,144 token）；选择用例后显示保守估算，超预算时拒绝发送，不截断输入。</span></p>
           </div>
         </details>
@@ -76,6 +84,12 @@
           <div class="preview-panel" id="preview-panel" role="tabpanel" aria-labelledby="tab-request" tabindex="0"><pre id="preview-content">正在加载…</pre></div>
         </article>
       </div>
+    </section>
+    <section class="panel history-panel" aria-labelledby="history-heading">
+      <div class="section-heading"><h2 id="history-heading"><span class="section-number">03</span> 运行汇总历史 <span class="count-badge" id="history-count">0</span></h2><div class="export-actions"><button class="button quiet" id="retry-history" type="button" hidden>重试保存</button><button class="button quiet" id="refresh-history" type="button">刷新</button><button class="button quiet" id="download-history" type="button" disabled>↓ 汇总历史 JSON</button></div></div>
+      <p class="hint history-note">按模型、集合保留每次运行的精简汇总，不保存 API key 或详细响应。不同集合、版本、阈值和选取范围应分别比较；停止或中断的运行单独标记。</p>
+      <p class="history-status" id="history-status" role="status">正在读取历史…</p>
+      <div class="history-table-wrap"><table class="history-table"><thead><tr><th scope="col">时间 / 状态</th><th scope="col">模型 / 集合</th><th scope="col">范围 / 完成</th><th scope="col">严格准确率</th><th scope="col">TP / TN</th><th scope="col">FP / FN</th><th scope="col">错误 / 未执行</th></tr></thead><tbody id="history-list"></tbody></table></div>
     </section>
     <footer><span><span class="footer-dot" aria-hidden="true"></span> 本地测试台 · System One 请求格式</span><span>停止将保留当前请求结果，并取消后续调度。</span></footer>
   </main>
