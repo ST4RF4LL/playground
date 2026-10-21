@@ -22,6 +22,10 @@ Windows 下可在仓库根目录运行 `python testcases/web/server.py`。数据
 | ATBench | 完整 Agent 交互轨迹的行为安全 | 200 条，安全/不安全各 100 |
 | OWASP Java Web | Java Web 数据流及密码算法、散列、Cookie 配置判定 | 180 条，正负各 90，无配对 |
 | CWEval | Python / JavaScript / Go 同功能实现的目标漏洞与防护识别 | 100 条 / 50 对 |
+| Devign / CodeXGLUE | C 函数级漏洞二分类，传统 ML 基准对照，不指定 CWE | 1,000 条，正负各 500，无配对 |
+| SecVulEval | C/C++ 完整函数的目标 CWE 与修复识别 | 1,000 条 / 500 对，20 类 CWE |
+
+Devign 与 SecVulEval 各扩充到 1,000 条并保留原 200 条，集合 ID 相应改为 `devign_test_1000` 和 `secvuleval_paired_1000`；旧结果记录仍保留原集合 ID，比较时需核对集合指纹。两套是独立派生子集，已去注释、排除来源重叠并保留上游标签；没有逐条动态复现。Devign 来自官方 test，SecVulEval 发布文件仅有名为 train 的完整数据，不声称独立留出。SecVulEval 本次不附加外部上下文或漏洞语句标注，分数不能与原论文的语句定位指标横比。
 
 Juliet 已升级为 `juliet_java_1000`（1,000 条 / 500 对），包含原 200 条。旧 200 条导出的结果属于旧集合版本，不能直接作为新集合的完整成绩。
 

@@ -13,6 +13,10 @@ code_vulnerability/sources/owasp_java_web/** -text whitespace=-blank-at-eol,-bla
 code_vulnerability/sources/cweval/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
 code_vulnerability/collections/owasp_java_web_180/** -text
 code_vulnerability/collections/cweval_100/** -text
+code_vulnerability/sources/devign/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
+code_vulnerability/sources/secvuleval/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
+code_vulnerability/collections/devign_test_1000/** -text
+code_vulnerability/collections/secvuleval_paired_1000/** -text
 agent_safety/sources/atbench/** -text whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
 agent_safety/collections/atbench_200/** -text
 code_vulnerability/sources/knowledge_workflow/cases/** whitespace=-blank-at-eol,-blank-at-eof,-space-before-tab
